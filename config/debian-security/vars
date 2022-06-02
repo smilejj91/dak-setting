@@ -1,0 +1,26 @@
+# -*- mode:sh -*-
+
+declare -r functionname=security-master.debian.org
+declare -r confpart=debian-security
+
+declare -r ftpgroup=debadmin
+declare -r public_archives=(security) #debian-security-debug
+
+declare -r base=/srv/${functionname}
+declare -r incoming=${base}/buildd
+declare -r masterdir=${base}/dak/
+export configdir=${configdir:-${masterdir}/config/${confpart}/}
+
+# And the following types of cronscripts exists
+declare -r POSSIBLEARGS='+(unchecked|unchecked-dinstall|hourly|daily|weekly|mirror|deploy)'
+
+# And get all the tons of other variables
+source ${configdir}/../common/variables
+
+# Stuff for old cron scripts not yet switched to new style
+declare -r uploadhost=ftp-master.debian.org
+declare -r uploaddir=/pub/UploadQueue/
+
+components="main non-free contrib"
+override_types="deb dsc udeb"
+declare -r suites=$(dak admin s list)

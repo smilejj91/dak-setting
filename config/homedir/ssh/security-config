@@ -1,0 +1,41 @@
+# Please edit the master copy in dak.git!
+#   path: config/homedir/ssh/security-config
+
+ConnectTimeout 30
+ServerAliveInterval 30
+ForwardX11 no
+ForwardAgent no
+StrictHostKeyChecking yes
+PasswordAuthentication no
+BatchMode yes
+
+Host buildd
+  IdentityFile ~/.ssh/id_buildd
+  ControlMaster auto
+  ControlPath ~/.ssh/socket-buildd.debian.org
+  ControlPersist 60
+
+Host morgue-sync
+  Hostname lw01.debian.org
+  User dak
+  IdentityFile /srv/security-master.debian.org/s3kr1t/push_morgue
+
+Host rsync-from-security-upload-master
+  Hostname suchon.debian.org
+  User dak
+  IdentityFile /srv/security-master.debian.org/s3kr1t/rsync-from-security-upload-master
+  ControlMaster auto
+  ControlPath ~/.ssh/socket-%n
+  ControlPersist yes
+
+Host rsync-to-ssh.upload.debian.org
+  Hostname usper.debian.org
+  User dak
+  IdentityFile /srv/security-master.debian.org/s3kr1t/rsync-to-ssh.upload.debian.org
+  ControlMaster auto
+  ControlPath ~/.ssh/socket-%n
+  ControlPersist yes
+
+Host lw08.debian.org
+  User dak
+  IdentityFile /srv/security-master.debian.org/s3kr1t/fetch_snapshot_hashes

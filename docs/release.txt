@@ -1,0 +1,455 @@
+Notes from the Debian Stretch release
+=====================================
+
+configdir=${configdir:-"/srv/ftp-master.debian.org/dak/config/debian"}
+export SCRIPTVARS=${configdir}/vars
+. "${SCRIPTVARS}"
+. "${configdir}/dinstall.functions"
+umask 022
+
+sql() {(
+  set -eu
+  psql -qAt "${@}"
+)}
+
+rename-suite() {(
+  set -xeu
+
+  local oldsuite="${1:?}"
+  local newsuite="${2:?}"
+  archive_path=$(sql -c "SELECT path FROM archive WHERE id=(SELECT archive_id FROM suite WHERE suite_name='${oldsuite}')")
+
+  cd ${archive_path:?}/dists
+  if [[ -L ${newsuite} || -e ${newsuite} ]]; then
+    echo "E: ${newsuite} already exists" >&2
+    exit 1
+  fi
+
+  mv -- ${oldsuite} ${newsuite}
+
+  sql -1 <<-EOT
+	UPDATE suite
+	SET
+	  suite_name='${newsuite}',
+	  copychanges = CASE WHEN copychanges IS NULL THEN NULL ELSE 'dists/${newsuite}' END
+	WHERE suite_name='${oldsuite}'
+	;
+	UPDATE suite
+	SET overridesuite='${newsuite}'
+	WHERE overridesuite='${oldsuite}'
+	;
+	EOT
+)}
+
+rename-policy-queue() {(
+  set -xeu
+  oldqueue="${1:?}"
+  newqueue="${2:?}"
+  newpath="${3:?}"
+  oldpath=$(sql -c "SELECT path FROM policy_queue WHERE queue_name='${oldqueue}'")
+  if [[ -L ${newpath} || -e ${newpath} ]]; then
+    echo "E: ${newpath} already exists" >&2
+    exit 1
+  fi
+  mv -- ${oldpath:?} ${newpath}
+  sql -c "UPDATE policy_queue SET queue_name='${newqueue}', path='${newpath}' WHERE queue_name='${oldqueue}'"
+)}
+
+Notes from the Debian Buster release
+====================================
+
+Some notes from the Debian Buster release including some
+corrections. There might still be errors.
+
+export new_oldoldstable=jessie
+export new_oldstable=stretch
+export new_stable=buster
+export new_testing=bullseye
+
+rename-suite {,old}oldstable
+rename-suite {,old}oldstable-updates
+
+rename-suite {,old}stable
+rename-suite {,old}stable-debug
+rename-suite {,oldstable-}proposed-updates
+rename-suite {,oldstable-}proposed-updates-debug
+rename-suite {,old}stable-new
+rename-suite buildd-{,oldstable-}proposed-updates
+rename-policy-queue stable-new oldstable-new /srv/ftp-master.debian.org/queue/o-p-u-new
+
+rename-suite testing stable
+rename-suite testing-debug stable-debug
+rename-suite testing-proposed-updates proposed-updates
+rename-suite testing-proposed-updates-debug proposed-updates-debug
+rename-suite buildd-{testing-,}proposed-updates
+
+UPDATE SUITES:
+
+begin;
+
+\set new_oldoldstable `echo ${new_oldoldstable}`
+\set new_oldstable `echo ${new_oldstable}`
+\set new_stable `echo ${new_stable}`
+\set new_testing `echo ${new_testing}`
+
+-- update suites:
+
+update suite set validtime = 0 where codename = :'new_oldoldstable';
+update suite set version = '10.0', description = 'Debian 10.0 Released 06 July 2019', changelog = null, overrideprocess = false, overrideorigin = null, allowcsset = false, announce = array['debian-changes@lists.debian.org'], validtime = 0 where codename = :'new_stable';
+update suite set version = '10.0', description = 'Debian 10.0 Released 06 July 2019 - Debug Information', allowcsset = false, validtime = 0 where codename = concat(:'new_stable', '-debug');
+
+update suite set copychanges = 'dists/oldoldstable-proposed-updates', validtime = 0 where codename = concat(:'new_oldoldstable', '-proposed-updates');
+update suite set release_suite = 'oldoldstable-updates', validtime = 0 where codename = concat(:'new_oldoldstable', '-updates');
+
+update suite set copychanges = 'dists/oldstable-proposed-updates', overridesuite = 'oldstable' where codename = concat(:'new_oldstable', '-proposed-updates');
+update suite set release_suite = 'oldstable-updates' where codename = concat(:'new_oldstable', '-updates');
+
+update suite set version = '10-updates', description = 'Proposed Updates for Debian 10 - Not Released', copychanges = 'dists/proposed-updates', overridesuite = 'stable', announce = array['debian-changes@lists.debian.org'] where codename = concat(:'new_stable', '-proposed-updates');
+update suite set release_suite = 'stable-updates' where codename = concat(:'new_stable', '-updates');
+
+update suite set untouchable = true where codename in (:'new_oldoldstable', :'new_stable', concat(:'new_stable', '-debug'), concat(:'new_oldoldstable', '-proposed-updates'), concat(:'new_oldoldstable', '-updates'));
+
+update suite set signingkeys = ARRAY['E1CF20DDFFE4B89E802658F1E0B11894F66AEC98', '80D15823B7FD1561F9F7BCDDDC30D7C23CBBABEE'] WHERE suite_name LIKE 'buildd-%' OR suite_name LIKE 'buster%' OR suite_name IN ('stable', 'stable-debug', 'proposed-updates', 'proposed-updates-debug', 'experimental', 'experimental-debug', 'unstable', 'unstable-debug', 'unstable-data');
+update suite set signingkeys = ARRAY['126C0D24BD8A2942CC7DF8AC7638D0442B90D010', 'E1CF20DDFFE4B89E802658F1E0B11894F66AEC98'] WHERE suite_name LIKE 'oldstable%' OR suite_name IN ('stretch-backports', 'stretch-backports-debug', 'stretch-updates');
+
+commit;
+
+MOVE STUFF AROUND:
+
+cd /srv/ftp-master.debian.org/ftp/dists
+
+rm oldstable-backports oldstable-proposed-updates oldstable-updates
+ln -sTf ${new_oldstable}-backports oldstable-backports
+ln -sTf ${new_oldstable}-proposed-updates oldstable-proposed-updates
+ln -sTf ${new_oldstable}-updates oldstable-updates
+
+rm stable-backports stable-proposed-updates stable-updates
+ln -sTf ${new_stable}-backports stable-backports
+ln -sTf ${new_stable}-proposed-updates stable-proposed-updates
+ln -sTf ${new_stable}-updates stable-updates
+
+rm testing testing-proposed-updates testing-updates
+ln -sTf ${new_testing} testing
+ln -sTf ${new_testing}-proposed-updates testing-proposed-updates
+ln -sTf ${new_testing}-updates testing-updates
+
+ln -sT ${new_stable} Debian10.0
+
+# edit README, README.html, dists/README
+rm -r dists/${new_stable}/*/*.diff
+rm dists/${new_stable}/ChangeLog*
+# add new dists/${new_stable}/ChangeLog:
+cd /srv/ftp-master.debian.org/ftp/dists/${new_stable}
+cat >ChangeLog <<EOT
+=========================================
+Sat, 06 Jul 2019 - Debian 10.0 released
+=========================================
+EOT
+
+# check win32-loader!
+#  - even copy in testing/ might be outdated.
+
+cd /srv/ftp-master.debian.org/public/incoming.debian.org/web/debian-buildd/dists
+rm buildd-${new_stable}-proposed-updates buildd-${new_oldstable}-proposed-updates
+mv buildd-proposed-updates buildd-${new_oldstable}-proposed-updates
+mv buildd-testing-proposed-updates buildd-${new_stable}-proposed-updates
+ln -sT buildd-${new_oldstable}-proposed-updates buildd-oldstable-proposed-updates
+ln -sT buildd-${new_stable}-proposed-updates buildd-proposed-updates
+
+D-I CLEANUP:
+cd /srv/ftp-master.debian.org/ftp/dists/${new_stable}/main
+morgue=/srv/ftp-master.debian.org/morgue/d-i
+for arch in installer-*; do
+  for version in ${arch}/20*; do
+    case ${version} in
+      */20190702) ;;
+      *) mv -v -- ${version} ${morgue}/${arch}/ ;;
+    esac
+  done
+done
+
+INDICES:
+suite=stable
+dak generate-packages-sources2 --force -s ${suite},${suite}-debug
+dak contents generate -f -s ${suite} -a ftp-master
+
+for suite in stable stable-debug oldstable oldstable-debug oldoldstable oldoldstable-updates; do
+  dak generate-releases -f -s ${suite}
+done
+
+# rm InRelease for jessie, stretch
+
+for suite in oldoldstable oldstable oldstable-debug stable stable-debug; do
+  ${scriptsdir}/sync-release ${suite}
+done
+
+# Add signatures from release team
+# mirror push (CD MIRROR ONLY!)
+
+(
+  export SCRIPTVARS=${configdir}/vars
+  . "${SCRIPTVARS}"
+  . "${configdir}/common"
+  . "${configdir}/dinstall.functions"
+  umask 022
+  mirror
+  mirrorpush-release
+)
+
+${NEW_STABLE}-R0:
+dak admin suite add ${new_stable}-r0 '' description='Extraneous packages/sources required for GPL compliance' origin=Debian label=Debian codename=${new_stable}-r0 accept_source_uploads=false accept_binary_uploads=false archive=ftp-master
+dak admin s-c add ${new_stable}-r0 main contrib non-free
+dak admin s-a add ${new_stable}-r0 $(dak admin s-a list-arch stable)
+
+dak control-suite -l stable | grep '^debian-installer ' | dak control-suite -a ${new_stable}-r0
+dak control-suite -l ${new_stable}-r0
+
+\set new_stable `echo ${new_stable}`
+begin;
+  update suite set untouchable=true where codename=concat(:'new_stable', '-r0');
+commit;
+
+POLICY QUEUES:
+dak admin suite add stable-new '' codename=${new_stable}-new accept_source_uploads=false accept_binary_uploads=false archive=policy
+
+\set new_stable `echo ${new_stable}`
+begin;
+insert into policy_queue (queue_name, path, change_perms, suite_id) values ('stable-new', '/srv/ftp-master.debian.org/queue/p-u-new', '0644', (select id from suite where codename=concat(:'new_stable', '-new')));
+update suite set policy_queue_id = (select id from policy_queue where queue_name = 'stable-new') where codename = concat(:'new_stable', '-proposed-updates');
+commit;
+
+dak admin s-c add stable-new main contrib non-free
+dak admin s-a add stable-new source all $(dak admin s-a list-arch stable)
+
+NEW TESTING:
+dak admin suite add testing '' origin=Debian label=Debian codename=${new_testing} description='Debian x.y Testing distribution - Not Released' accept_source_uploads=false accept_binary_uploads=false allowcsset=True archive=ftp-master changelog_url='https://metadata.ftp-master.debian.org/changelogs/@CHANGEPATH@_changelog'
+dak admin s-c add testing main contrib non-free
+dak admin s-a add testing source all $(dak admin s-a list-arch stable)
+
+dak admin suite add testing-debug '' origin=Debian label='Debian debug' codename=${new_testing}-debug description='Debian x.y Testing distribution - Not Released - Debug Information' accept_source_uploads=false accept_binary_uploads=false allowcsset=True archive=debian-debug
+dak admin s-c add testing-debug main contrib non-free
+dak admin s-a add testing-debug source all $(dak admin s-a list-arch stable)
+
+dak admin suite add testing-proposed-updates '' origin=Debian label=Debian codename=${new_testing}-proposed-updates description='Debian x.y Testing distribution - Proposed Updates - Not Released' archive=ftp-master
+dak admin s-c add testing-proposed-updates main contrib non-free
+dak admin s-a add testing-proposed-updates source all $(dak admin s-a list-arch stable)
+
+dak admin suite add testing-proposed-updates-debug '' origin=Debian label='Debian debug' codename=${new_testing}-proposed-updates-debug description='Debian x.y Testing - Proposed Updates - Not Released - Debug Information' accept_source_uploads=false accept_binary_uploads=false archive=debian-debug
+dak admin s-c add testing-proposed-updates-debug main contrib non-free
+dak admin s-a add testing-proposed-updates-debug source all $(dak admin s-a list-arch stable)
+
+dak admin suite add testing-updates '' origin=Debian label=Debian codename=${new_testing}-updates description='Debian x.y Testing distribution Updates - Not Released' accept_source_uploads=false accept_binary_uploads=false allowcsset=True archive=ftp-master
+dak admin s-c add testing-updates main contrib non-free
+dak admin s-a add testing-updates source all $(dak admin s-a list-arch stable)
+
+for c in main contrib non-free; do
+  for t in deb dsc udeb; do
+    dak control-overrides -s stable -t ${t} -c ${c} -l | dak control-overrides -s testing -t ${t} -c ${c} --set
+  done
+done
+
+time dak update-suite stable testing
+
+# update-suite doesn't work for testing-debug (as there are no source packages)
+#time dak update-suite stable-debug testing-debug
+\set new_stable `echo ${new_stable}`
+\set new_testing `echo ${new_testing}`
+begin;
+  insert into bin_associations (suite, bin)
+  select
+    (select id from suite where codename = concat(:'new_testing', '-debug')) as suite,
+    bin
+  from bin_associations
+  where suite = (select id from suite where codename = concat(:'new_stable', '-debug'));
+commit;
+
+\set new_testing `echo ${new_testing}`
+begin;
+  update suite set changelog = concat('dists/', :'new_testing', '/ChangeLog'), overrideprocess=true, overrideorigin = 'unstable' where codename = :'new_testing';
+  update suite set announce=array['debian-testing-changes@lists.debian.org'] where codename in (:'new_testing', concat(:'new_testing', '-proposed-updates'));
+  update suite set overridesuite = 'testing' where codename in (:'new_testing', concat(:'new_testing', '-proposed-updates'), concat(:'new_testing', '-updates'));
+  update suite set signingkeys = array['E1CF20DDFFE4B89E802658F1E0B11894F66AEC98', '80D15823B7FD1561F9F7BCDDDC30D7C23CBBABEE'] where codename in (:'new_testing', concat(:'new_testing', '-debug'), concat(:'new_testing', '-proposed-updates'), concat(:'new_testing', '-proposed-updates-debug'), concat(:'new_testing', '-updates'));
+
+  update suite set debugsuite_id = (select id from suite where codename = concat(:'new_testing', '-debug')) where codename = :'new_testing';
+  update suite set debugsuite_id = (select id from suite where codename = concat(:'new_testing', '-proposed-updates-debug')) where codename = concat(:'new_testing', '-proposed-updates');
+
+  update suite set indices_compression = array['xz'], byhash=true, checksums=array['sha256'] where suite_name in ('testing-debug', 'testing-proposed-updates-debug', 'buildd-testing-proposed-updates', 'testing-proposed-updates', 'testing-updates');
+  update suite set indices_compression = array['gzip', 'xz'], byhash=true, checksums=array['md5sum', 'sha256'] where suite_name = 'testing';
+commit;
+
+dak external-overrides copy unstable testing
+
+dak admin s add-build-queue testing-proposed-updates buildd-testing-proposed-updates buildd-${new_testing}-proposed-updates build-queues
+
+cd /srv/ftp-master.debian.org/public/incoming.debian.org/web/debian-buildd/dists
+mkdir buildd-${new_testing}-proposed-updates
+ln -sT buildd-${new_testing}-proposed-updates buildd-testing-proposed-updates
+
+MOVE MOVING AROUND:
+cd /srv/ftp-master.debian.org/queue
+mv oldstable-proposed-updates oldoldstable-proposed-updates
+mv proposed-updates oldstable-proposed-updates
+mkdir -p p-u-new/COMMENTS proposed-updates
+
+V-C:
+dak admin v-c add testing-proposed-updates Enhances testing
+dak admin v-c add testing-proposed-updates MustBeOlderThan experimental
+dak admin v-c add testing-proposed-updates MustBeNewerThan stable
+dak admin v-c add testing-proposed-updates MustBeNewerThan oldstable
+dak admin v-c add testing-proposed-updates MustBeNewerThan oldoldstable
+dak admin v-c add testing-updates Enhances testing
+dak admin v-c add testing-proposed-updates MustBeNewerThan testing
+dak admin v-c add testing-updates MustBeNewerThan testing
+dak admin v-c add testing-updates MustBeOlderThan experimental
+dak admin v-c add testing-updates MustBeNewerThan stable
+dak admin v-c add testing-updates MustBeNewerThan oldstable
+dak admin v-c add testing-updates MustBeNewerThan oldoldstable
+dak admin v-c add unstable MustBeNewerThan testing
+dak admin v-c add experimental MustBeNewerThan testing
+
+# copy d-i to new testing (so same d-i in stable, testing, unstable)
+
+# backports
+dak admin suite add oldstable-backports-sloppy '' origin="Debian Backports" label='Debian Backports' codename=${new_oldstable}-backports-sloppy description='Debian 9 - Sloppy Backports' archive=ftp-master
+dak admin suite add oldstable-backports-sloppy-debug '' origin="Debian Backports" label='Debian Backports debug' codename=${new_oldstable}-backports-sloppy-debug description='Debian 9 - Sloppy Backports - Debug Information' archive=debian-debug
+
+dak admin suite add stable-backports-debug '' origin="Debian Backports" label='Debian Backports debug' codename=${new_stable}-debug description='Debian 10 - Backports - Debug Information' archive=debian-debug
+
+dak admin suite add testing-backports '' origin="Debian Backports" label='Debian Backports' codename=${new_testing}-backports description='Debian X.Y - Backports' archive=ftp-master
+dak admin suite add testing-backports-debug '' origin="Debian Backports" label='Debian Backports debug' codename=${new_testing}-backports-debug description='Debian X.Y - Backports - Debug Information' archive=debian-debug
+
+configure-backports-suite() {
+  local suite=${1:?}
+  local reference=${2:?}
+  dak admin s-c add ${suite} main contrib non-free
+  dak admin s-a add ${suite} source all $(dak admin s-a list-arch ${reference})
+  dak admin suite-config set ${suite} notautomatic=true butautomaticupgrades=true accept_source_uploads=false accept_binary_uploads=false close_bugs=false
+}
+
+for suite in oldstable-backports-sloppy oldstable-backports-sloppy-debug; do
+  configure-backports-suite ${suite} ${new_oldstable}
+done
+for suite in stable-backports-debug; do
+  configure-backports-suite ${suite} ${new_stable}
+done
+for suite in testing-backports testing-backports-debug; do
+  configure-backports-suite ${suite} ${new_testing}
+done
+
+cd ${ftpdir}/dists
+ln -sT ${new_oldstable}-backports-sloppy oldstable-backports-sloppy
+
+dak admin s add-build-queue ${new_oldstable}-backports-sloppy buildd-${new_oldstable}-backports-sloppy buildd-${new_oldstable}-backports-sloppy build-queues
+dak admin s add-build-queue ${new_stable}-backports buildd-${new_stable}-backports buildd-${new_stable}-backports build-queues
+dak admin s add-build-queue ${new_testing}-backports buildd-${new_testing}-backports buildd-${new_testing}-backports build-queues
+
+\set new_oldstable `echo ${new_oldstable}`
+\set new_stable `echo ${new_stable}`
+\set new_testing `echo ${new_testing}`
+begin;
+
+  update suite set
+      debugsuite_id = (select id from suite where codename=concat(:'new_oldstable', '-backports-sloppy-debug')),
+      policy_queue_id = (select id from policy_queue where queue_name = 'backports-policy')
+      where codename=concat(:'new_oldstable', '-backports-sloppy');
+  update suite set debugsuite_id = (select id from suite where codename=concat(:'new_stable', '-backports-debug')) where codename=concat(:'new_stable', '-backports');
+  update suite set debugsuite_id = (select id from suite where codename=concat(:'new_testing', '-backports-debug')) where codename=concat(:'new_testing', '-backports');
+
+  update suite set
+    announce=array['debian-backports-changes@lists.debian.org'],
+    indices_compression=array['xz'],
+    i18n_compression=array['xz'],
+    byhash=true,
+    checksums=array['sha256'],
+    new_queue_id=10,
+    changelog_url='http://metadata.ftp-master.debian.org/changelogs/@CHANGEPATH@_changelog'
+  where codename in (
+      concat(:'new_oldstable', '-backports-sloppy'), concat(:'new_stable', '-backports'), concat(:'new_testing', '-backports'),
+      concat(:'new_oldstable', '-backports-sloppy-debug'), concat(:'new_stable', '-backports-debug'), concat(:'new_testing', '-backports-debug'),
+      concat('buildd-', :'new_oldstable', '-backports-sloppy'), concat('buildd-', :'new_stable', '-backports'), concat('buildd-', :'new_testing', '-backports'));
+
+  update suite set signingkeys = ARRAY['126C0D24BD8A2942CC7DF8AC7638D0442B90D010', 'E1CF20DDFFE4B89E802658F1E0B11894F66AEC98'] where suite_name in ('stretch-backports-sloppy', 'stretch-backports-sloppy-debug', 'buildd-stretch-backports-sloppy');
+  update suite set signingkeys = ARRAY['E1CF20DDFFE4B89E802658F1E0B11894F66AEC98', '80D15823B7FD1561F9F7BCDDDC30D7C23CBBABEE'] WHERE suite_name IN ('buster-backports', 'buster-backports-debug', 'buildd-buster-backports', 'bullseye-backports', 'bullseye-backports-debug', 'buildd-bullseye-backports');
+
+  insert into suite_permission (suite_id, role)
+    select id, 'backports' from suite
+    where codename in (concat(:'new_oldstable', '-backports-sloppy'), concat(:'new_testing', '-backports'));
+
+commit;
+
+for s in ${new_oldstable}-backports-sloppy{,-debug} ${new_stable}-backports{,-debug} ${new_testing}-backports{,-debug}; do
+  dak generate-packages-sources2 -s ${s}
+done
+
+FINISH:
+for s in testing testing-proposed-updates testing-updates; do
+  dak generate-packages-sources2 -s ${s}
+  dak contents generate -s ${s} -a ftp-master
+done
+dak generate-releases -a ftp-master
+dak generate-packages-sources2 -s testing-debug
+dak generate-releases -s testing-debug
+dak generate-packages-sources2 -a build-queues
+dak generate-releases -a build-queues
+
+
+########################################################################
+# On security-master:
+
+rename-suite {,old}oldstable
+rename-suite {,old}stable
+rename-suite testing stable
+rename-suite {,old}stable-debug
+rename-suite testing-debug stable-debug
+rename-suite buildd-{,old}oldstable
+rename-suite buildd-{,old}stable
+rename-suite buildd-testing buildd-stable
+
+begin;
+  update suite set signingkeys = array['6ED6F5CB5FA6FB2F460AE88EEDA0D2388AE22BA9', '5E61B217265DDA9807A23C5FF4DFAB270CAA96DFA'] where suite_name in ('stable', 'stable-debug', 'buildd-stable');
+  update suite set indices_compression=array['xz'], i18n_compression=array['xz'], checksums=arraay['sha256'], byhash=true where suite_name in ('buildd-stable', 'stable-debug', 'stable');
+
+  update suite set version = '10', description = 'Debian 10 - Security Updates - Debug Information' where suite_name = 'stable';
+  update suite set version = '10', description = 'Debian 10 - Security Updates - Debug Information' where suite_name = 'stable-debug';'
+commit;
+
+
+dak admin suite add testing-security '' origin=Debian label=Debian-Security codename=${new_testing:?}-security description='Debian x.y Testing - Security Updates - Not Released' accept_source_uploads=false accept_binary_uploads=false archive=security
+
+dak admin suite add testing-security-debug '' origin=Debian label="Debian-Security debug" codename=${new_testing:?}-security-debug description='Debian x.y Testing - Security Updates - Debug Information - Not Released' accept_source_uploads=false accept_binary_uploads=false archive=debian-security-debug
+
+for suite in testing-security testing-security-debug; do
+  dak admin s-c add ${suite} updates/{main,contrib,non-free}
+  dak admin s-a add ${suite} source all $(dak admin s-a list-arch stable)
+done
+
+dak admin s add-build-queue testing-security buildd-testing-security buildd-${new_testing:?}-security build-queues
+
+\set new_testing `echo ${new_testing}`
+begin;
+  update suite set indices_compression=array['xz'], i18n_compression=array['xz'], checksums=array['sha256'], byhash=true, signingkeys = array['6ED6F5CB5FA6FB2F460AE88EEDA0D2388AE22BA9', '5E61B217265DA9807A23C5FF4DFAB270CAA96DFA'] where suite_name in ('testing-security', 'testing-security-debug', 'buildd-testing-security');
+  update suite set
+      debugsuite_id = (select id from suite where suite_name = 'testing-security-debug'),
+      policy_queue_id = (select id from policy_queue where queue_name = 'embargoed')
+      where suite_name = 'testing-security';
+commit;
+
+cd ${ftpdir}/dists
+mkdir ${new_testing}-security
+ln -sT ${new_testing}-security testing-security
+ln -sT . ${new_testing}-security/updates
+
+cd /srv/security-master.debian.org/build-queues/dists
+mkdir buildd-${new_testing}-security
+ln -sT buildd-${new_testing}-security buildd-testing-security
+ln -sT . ${new_testing}-security/updates
+
+cd /srv/security-master.debian.org/archive/debian-security-debug/dists
+mkdir ${new_testing}-security-debug
+ln -sT ${new_testing}-security-debug testing-security-debug
+ln -sT . ${new_testing}-security-debug/updates
+
+for suite in testing-security buildd-testing-security; do
+  dak generate-packages-sources2 -s ${suite}
+  dak generate-releases -s ${suite}
+done

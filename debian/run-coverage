@@ -1,0 +1,27 @@
+#! /bin/bash
+
+TESTS="integration-tests/tests/[0-9]*[^~] \
+    run-dbtests unit_tests"
+
+for TEST in $TESTS
+do
+    dir=output/coveragedata/data_${TEST##*/}
+    echo get coveragedata from $dir
+    if [ ! -d $dir ]
+    then
+        echo no coverage data for $TEST, did the test run?
+        exit 1
+    fi
+    cp $dir/.coverage.* .
+done
+
+apt-get update
+apt-get install -y python3-coverage
+
+python3-coverage combine --append
+python3-coverage report -m
+echo
+python3-coverage html -d coverage
+
+mkdir -p logs
+cp output/log* logs/

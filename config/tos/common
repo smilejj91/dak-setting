@@ -1,0 +1,498 @@
+# -*- mode:sh -*-
+# log something (basically echo it together with a timestamp)
+#
+# Set $PROGRAM to a string to have it added to the output.
+function log () {
+    local prefix=${PROGRAM:-}
+    echo "$(date +"%b %d %H:%M:%S") ${HOSTNAME} ${prefix}[$$]: $*"
+}
+
+# log the message using log() but then also send a mail
+# to the address configured in MAILTO (if non-empty)
+function log_error () {
+    log "$@"
+    if [[ -z ${MAILTO} ]]; then
+        echo "$*" | mail -a "X-Debian: DAK" -e -s "[$PROGRAM@${HOSTNAME}] ERROR [$$]" -a "From: Debian FTP Masters <ftpmaster@ftp-master.debian.org>" ${MAILTO}
+    fi
+}
+
+# debug log, only output when DEBUG=1
+function debug () {
+    if [[ $DEBUG -eq 1 ]]; then
+        log "$*"
+    fi
+}
+
+# Get a tempfile, add it to the right variable to get rid of it,
+# and return it
+function gettempfile() {
+    local MAKEDIR=${1:-false}
+    local TMPARGS=""
+    if [[ ${MAKEDIR} == true ]]; then
+        TMPARGS="--directory"
+    fi
+    local TMPFILE=$( mktemp -p ${TMPDIR} ${TMPARGS} )
+    TMPFILES="${TEMPFILES} ${TMPFILE}"
+    echo "${TMPFILE}"
+}
+
+# Function that only cleans tempfiles, but does not exit or otherwise
+# care about any exit status
+function cleantempfiles() {
+    resolvetmpfiles
+    for TEMPFILE in $TMPFILES; do
+        if [[ -n ${TEMPFILE} ]] && [[ -f ${TEMPFILE} ]]; then
+            rm -f "${TEMPFILE}"
+        elif [[ -n ${TEMPFILE} ]] && [[ -d ${TEMPFILE} ]]; then
+            if [[ ${TEMPFILE} != / ]] && [[ ${TEMPFILE} != /* ]]; then
+                rm -rf "${TEMPFILE}"
+            fi
+        fi
+    done
+    TMPFILES=""
+}
+
+function resolvetmpfiles() {
+    # If you don't understand this better not touch the script
+    for TEMPFILE in $TEMPFILES; do
+        TMPFILES="${TMPFILES} ${!TEMPFILE:-""}"
+    done
+    TEMPFILES=""
+}
+
+# Function cleanup
+# No arguments
+# Cleans up any known tempfile.
+# Just ensure your script sets the variable
+# TEMPFILES to the names of variables of tempfiles
+# Or TMPFILES to the pathes of tempfiles
+function cleanup() {
+    ERRVAL=$?
+    trap - ERR EXIT TERM HUP INT QUIT
+
+    cleantempfiles
+
+    return $ERRVAL
+}
+TEMPFILES=${TEMPFILES:-""}
+TMPFILES=${TMPFILES:-""}
+
+# Timestamp. Used for dinstall stat graphs
+function log_timestamp() {
+    echo "Archive maintenance timestamp ($1): $(date +%H:%M:%S)"
+}
+
+########################################################################
+########################################################################
+
+# used by cron.dinstall *and* cron.unchecked.
+function make_buildd_dir () {
+    local archive=$1
+
+    # We generate straight into the static mirror location for incoming
+    log "Preparing buildd area"
+    dak manage-build-queues -a
+    dak generate-packages-sources2 -a build-queues
+    dak generate-releases -a build-queues >/dev/null
+
+   # if [[ $archive = security ]]; then
+   #     ${scriptsdir}/update-buildd-archive ${base}/build-queues ${incoming}/debian-security-buildd
+   #     sudo -u archvsync runmirrors -a security-buildd-pool
+   # else
+   #     # Stick a last modified date in the page footer
+   #     echo "<p>Last updated: $(date -u)</p>" > ${incoming}/web/README.html
+
+   #     write_project_trace "${incoming}/web/debian-buildd"
+
+        # Tell the mirrors that we've updated
+   #     log "Pushing static for incoming.d.o"
+   #     sudo -u archvsync runmirrors -a buildd > ~dak/runmirrors-buildd.log 2>&1 &
+   #     chronic timeout -k 600 480 /usr/local/bin/static-update-component incoming.debian.org < /dev/null
+   #     wait
+   # fi
+}
+
+# Process (oldstable)-proposed-updates "NEW" queue
+function punew_do() {
+    local queue="$1"
+    local qdir="$2"
+    local to="${3}"
+
+    date -u -R >> REPORT
+    dak process-policy "${queue}" | tee -a REPORT | mail -a "X-Debian: DAK" -e -s "NEW changes in ${queue}" -a "From: Debian FTP Masters <ftpmaster@ftp-master.debian.org>" "${to}"
+    echo >> REPORT
+
+    dak generate-packages-sources2 -s "${queue}"
+
+    STAMP=${STAMP:-$(date "+%Y%m%d%H%M")}
+
+    local ppexportdir="${qdir}/tree/${STAMP}"
+    local targetdir="${qdir}/export"
+    mkdir -p -- ${ppexportdir}
+    dak export -q "${queue}" -d "${ppexportdir}" --all
+    ln -sfT ${ppexportdir} ${targetdir}
+    find "${qdir}/tree" -mindepth 1 -maxdepth 1 -not -name "${STAMP}" -type d -print0 | xargs --no-run-if-empty -0 rm -rf
+}
+
+# These versions used in dinstall
+function punew() {
+    log "Doing automated p-u-new processing"
+    cd "${queuedir}/p-u-new"
+    punew_do "$1" "${queuedir}/p-u-new" "debian-release@lists.debian.org"
+}
+
+function opunew() {
+    log "Doing automated o-p-u-new processing"
+    cd "${queuedir}/o-p-u-new"
+    punew_do "$1" "${queuedir}/o-p-u-new" "debian-release@lists.debian.org"
+}
+
+function backports_policy() {
+    local queue="backports-policy"
+    local qdir="/srv/backports-master.debian.org/queue/policy"
+    local to="backports-team@debian.org"
+
+    log "Doing automated ${queue} processing"
+
+    cd "${qdir}"
+    punew_do "${queue}" "${qdir}" "${to}"
+}
+
+# Do the unchecked processing, in case we have files.
+function do_unchecked () {
+    cd $unchecked
+
+    changes=$(find . -maxdepth 1 -mindepth 1 -type f \( -name \*.changes -o -name \*.dak-commands \) | sed -e "s,./,," | xargs)
+    report=${queuedir}/REPORT
+    timestamp=$(date "+%Y-%m-%d %H:%M")
+
+    if [[ -n ${changes} ]]; then
+        log "Processing files ${changes}"
+        {
+            echo "${timestamp}: ${changes}"
+            dak process-upload -a -d "$unchecked"
+            dak process-commands -d "$unchecked"
+        } >> ${report}
+        dak manage-external-signature-requests
+    else
+        log "Nothing to do"
+        echo "Nothing to do" >> ${report}
+    fi
+}
+
+function trigger_wb() {
+    SSHOPT="-n -o BatchMode=yes -o ConnectTimeout=30 -o SetupTimeout=240"
+    ssh -q -q ${SSHOPT} wbadm@buildd /srv/wanna-build/trigger.often
+}
+
+# process NEW policy queue
+function do_new () {
+    log "Doing NEW processing"
+    (dak process-policy new; dak process-policy byhand) #| mail -a "X-Debian: DAK" -e -s "NEW and BYHAND processing" -a "From: Debian FTP Masters <ftpmaster@ftp-master.debian.org>" ftpmaster@ftp-master.debian.org
+
+    #log "Processing Backports NEW"
+    #dak process-policy backports-new | mail -a "X-Debian: DAK" -e -s "NEW processing for backports-new" -a "From: Debian FTP Masters <ftpmaster@ftp-master.debian.org>" backports-team@debian.org
+
+    log "Cleanup NEW/Backports NEW"
+    dak clean-suites -a new #,backports-new
+}
+
+function sync_debbugs () {
+    # sync with debbugs
+    log "Sync debbugs version tracking information"
+    timestamp=$(date "+%Y-%m-%d-%H:%M")
+    mkdir -p $queuedir/bts_version_track_archive/${timestamp}
+    rsync -aq $queuedir/bts_version_track/ $queuedir/bts_version_track_archive/${timestamp}
+    rmdir --ignore-fail-on-non-empty $queuedir/bts_version_track_archive/${timestamp} # remove if empty.
+    rsync -aq -e "ssh -o Batchmode=yes -o ConnectTimeout=30 -o SetupTimeout=30" --remove-source-files  $queuedir/bts_version_track/ bugs-sync:/srv/bugs.debian.org/versions/queue/ftp-master/ 2>/dev/null && touch $lockdir/synced_bts_version || true
+    NOW=$(date +%s)
+    TSTAMP=$(stat -c %Y $lockdir/synced_bts_version)
+    DIFF=$(( NOW - TSTAMP ))
+    if [[ $DIFF -ge 259200 ]]; then
+        log_error "Kids, you tried your best and you failed miserably. The lesson is, never try. (Homer Simpson)"
+    fi
+}
+
+function clean_debbugs () {
+    log "Cleanup debbugs"
+    # Delete files older than 60 days
+    find $queuedir/bts_version_track_archive/ -mtime +60 -type f -delete
+    # Delete empty directories
+    find $queuedir/bts_version_track_archive/ -empty -type d -delete
+}
+
+function reports() {
+    # Send a report on NEW/BYHAND packages
+    log "Nagging ftpteam about NEW/BYHAND packages"
+    dak queue-report | mail -a "X-Debian: DAK" -e -s "NEW and BYHAND on $(date +%D)" -a "From: Debian FTP Masters <ftpmaster@ftp-master.debian.org>" ftpmaster@ftp-master.debian.org
+    dak queue-report -d backports-new,backports-policy | mail -a "X-Debian: DAK" -e -s "NEW and POLICY on $(date +%D)" -a "From: Debian FTP Masters <ftpmaster@ftp-master.debian.org>" backports-team@debian.org
+    # and one on crufty packages
+    log "Sending information about crufty packages"
+    dak cruft-report -R > $webdir/cruft-report-daily.txt.new
+    dak cruft-report -R -s experimental >> $webdir/cruft-report-daily.txt.new
+    echo "Page generated on $(date -u)" >> $webdir/cruft-report-daily.txt.new
+    mv $webdir/cruft-report-daily.txt.new $webdir/cruft-report-daily.txt
+    mail -a "X-Debian: DAK" -e -s "Debian archive cruft report for $(date +%D)" -a "From: Debian FTP Masters <ftpmaster@ftp-master.debian.org>" ftpmaster@ftp-master.debian.org < $webdir/cruft-report-daily.txt
+}
+
+function pg_timestamp() {
+    tsname=${1:-"unknown"}
+    log "Saving postgres transaction id for ${tsname}"
+    log `psql -tAc 'select txid_current();'` #>${base}/backup/txid_${tsname}_$(date +%Y.%m.%d-%H:%M:%S)
+}
+
+function get_archiveroot() {
+    local archivename="$1"
+    local query="SELECT path FROM archive WHERE name='${archivename}'"
+    local archiveroot="$(psql -tAc "${query}")"
+    if [[ -z ${archiveroot} ]]; then
+        echo "get_archiveroot: couldn't get archiveroot for '${archivename}'" >&2
+        return 1
+    fi
+    echo "${archiveroot}"
+}
+
+# Cleanup policy queues
+function cleanpolicy() {
+    dak clean-suites -a backports-policy,policy
+}
+
+# Scan new packages for contents
+function scancontents() {
+    dak contents -l 10000 scan-binary
+    dak contents -l 1000 scan-source
+}
+
+function ddaccess() {
+    # Tell our dd accessible mirror to sync itself up.
+    log "Trigger dd accessible parts sync"
+    ${scriptsdir}/sync-dd dd-sync dd-sync1 dd-sync2 sync
+}
+
+# Write ${path}/project/trace for given path
+#   Note: use `write_project_trace` which sets version and date variables
+function write_project_trace1() {
+    local path="${1}"
+
+    local tracedir="${path}/project/trace"
+    local TRACEFILE="${tracedir}/${functionname}"
+    local TRACEFILE_MASTER="${tracedir}/master"
+    local HIERFILE="${tracedir}/_hierarchy"
+
+    mkdir -p -- "${tracedir}"
+
+    local DATE_SERIAL=$(date +"%Y%m%d01")
+    local FILESOAPLUS1=$(awk '/serial/ { print $3+1 }' ${TRACEFILE} || echo ${DATE_SERIAL} )
+    local SERIAL
+    if [[ ${DATE_SERIAL} -gt ${FILESOAPLUS1}  ]]; then
+        SERIAL="${DATE_SERIAL}"
+    else
+        SERIAL="${FILESOAPLUS1}"
+    fi
+
+    cat <<EOF > ${TRACEFILE}
+${DATE}
+Creator: dak ${CREATOR_VERSION}
+Running on host: ${HOST}
+Archive serial: ${SERIAL}
+Date: ${RFC822DATE}
+Architectures: ${archs%* } source
+EOF
+
+    cat <<EOF > ${HIERFILE}
+${functionname} ${functionname} ${HOST} ${HOST}
+EOF
+    cp ${HIERFILE} ${HIERFILE}.mirror
+
+    # Now make it accessible via one name, no matter on which host we run
+    ln -sf $(basename ${TRACEFILE}) ${TRACEFILE_MASTER}
+}
+
+# Write ${path}/project/trace for given paths
+function write_project_trace() {
+    cd ${configdir}
+
+    local CREATOR_VERSION="g$(git rev-parse --short HEAD)"
+    local DATE=$(LC_ALL=POSIX LANG=POSIX date -u)
+    local RFC822DATE=$(LC_ALL=POSIX LANG=POSIX date -u -R)
+    local HOST=$(hostname -f)
+
+    local path
+    for path in "${@}"; do
+        write_project_trace1 "${path}"
+    done
+}
+
+function fingerprints() {
+    log "Updating fingerprints"
+
+    local todo=${1:-all}
+    dak import-keyring -L /srv/keyring.debian.org/keyrings/debian-keyring.gpg
+
+    if [[ ${todo} == all ]]; then
+        dak import-keyring -L /srv/keyring.debian.org/keyrings/debian-nonupload.gpg
+
+        OUTFILE=$( gettempfile )
+        dak import-keyring --generate-users "%s" /srv/keyring.debian.org/keyrings/debian-maintainers.gpg >"${OUTFILE}"
+
+        if [[ -s ${OUTFILE} ]]; then
+            /usr/sbin/sendmail -odq -oi -t -f envelope@ftp-master.debian.org <<EOF
+From: Debian FTP Masters <ftpmaster@ftp-master.debian.org>
+To: <debian-project@lists.debian.org>
+Subject: Debian Maintainers Keyring changes
+Content-Type: text/plain; charset=utf-8
+X-Debian: DAK
+MIME-Version: 1.0
+
+The following changes to the debian-maintainers keyring have just been activated:
+
+$(cat $OUTFILE)
+
+Debian distribution maintenance software,
+on behalf of the Keyring maintainers
+
+EOF
+        fi
+        rm -f "$OUTFILE"
+    fi
+}
+
+function dakcleanup() {
+    log "Cleanup old packages/files"
+    local queuevarnames=${1:-unchecked}
+    dak clean-suites -m 10000
+    for queue in ${queuevarnames}; do
+        dak clean-queues -i ${!queue}
+    done
+}
+
+function mklslar() {
+    local archiveroot
+    local FILENAME=ls-lR
+
+    for archive in "${public_archives[@]}"; do
+        archiveroot="$(get_archiveroot "${archive}")"
+        cd "${archiveroot}"
+
+        log "Removing any core files ..."
+        find -type f -name core -print -delete
+
+        log "Checking symlinks ..."
+        symlinks -rd .
+
+        log "Creating recursive directory listing ... "
+        rm -f ${FILENAME}.gz
+        TZ=UTC ls -lR | gzip -9c --rsyncable --no-name > ${FILENAME}.gz
+    done
+}
+
+function linkmorgue() {
+    ${scriptsdir}/link_morgue.sh
+}
+
+function fetchqueuedpackages() {
+    local host=$1
+    # Sync new uploaded packages from the central upload queue host.
+    log "Sync new uploads from upload queues"
+    cd ${unchecked}
+#   rsync -rtq -e 'ssh -p 2022' --safe-links --chmod=F640,D755 --remove-source-files $1:/srv/upload.tmaxos.net/for-ftpmaster/ . || true
+    rsync -rtq --safe-links --chmod=F640,D755 --remove-source-files $1:/srv/upload.tmaxos.net/for-ftpmaster/ . || true
+}
+
+########################################################################
+########################################################################
+########################################################################
+########################################################################
+
+# Function to save which stage we are in, so we can restart an interrupted
+# dinstall. Or even run actions in parallel, if we dare to, by simply
+# backgrounding the call to this function. But that should only really be
+# done for things we don't care much about.
+#
+# This should be called with the first argument being an array, with the
+# members
+#  - FUNC - the function name to call
+#  - ARGS - Possible arguments to hand to the function. Can be the empty string
+#  - TIME - The timestamp name. Can be the empty string
+#  - ERR  - if this is the string false, then the call will be surrounded by
+#           set +e ... set -e calls, so errors in the function do not exit
+#           dinstall. Can be the empty string, meaning true.
+#
+# MAKE SURE TO KEEP THIS THE LAST FUNCTION, AFTER ALL THE VARIOUS ONES
+# ADDED FOR DINSTALL FEATURES!
+function stage() {
+    ARGS='GO[@]'
+    local "${!ARGS}"
+
+    local error=${ERR:-"true"}
+
+    ARGS=${ARGS:-""}
+
+    log "########## ${PROGRAM} BEGIN: ${FUNC} ${ARGS} ##########"
+    local STAGEFILE="${stagedir}/${FUNC}${ARGS:+_}${ARGS}"
+    STAGEFILE=${STAGEFILE// /_}
+    if [[ -f ${STAGEFILE} ]]; then
+        local stamptime=$(/usr/bin/stat -c %Z "${STAGEFILE}")
+        local unixtime=$(date +%s)
+        local difference=$(( unixtime - stamptime ))
+        if [[ ${difference} -ge 14400 ]]; then
+            log_error "Did already run ${FUNC}, stagefile exists, but that was ${difference} seconds ago. Please check."
+        else
+            log "Did already run ${FUNC}, not calling again..."
+        fi
+        return
+    fi
+
+    debug "Now calling function ${FUNC}. Arguments: ${ARGS}. Timestamp: ${TIME}"
+
+    # Make sure we are always at the same place. If a function wants
+    # to be elsewhere, it has to cd first!
+    cd ${configdir}
+
+    if [[ -f ${LOCK_STOP} ]]; then
+        log "${LOCK_STOP} exists, exiting immediately"
+        exit 42
+    fi
+
+    # Do we care about trouble in the function we call?
+    if [[ ${error} == false ]]; then
+        set +e
+    fi
+
+    # Now redirect the output into $STAGEFILE.log. In case it errors
+    # out somewhere our errorhandler trap can then mail the contents
+    # of $STAGEFILE.log only, instead of a whole ${PROGRAM} logfile.
+    # Short error mails ftw!
+    if [[ ${TIMESTAMP} == true ]]; then
+      ${FUNC} ${ARGS} 2>&1 | tee -a "${STAGEFILE}.log" | ts "%b %d %H:%M:%S ${HOSTNAME} ${PROGRAM}[$$]: ${FUNC} "
+    else
+      ${FUNC} ${ARGS} 2>&1 | tee -a "${STAGEFILE}.log"
+    fi
+
+    # No matter what happened in the function, we make sure we have
+    # set -e default state back
+    set -e
+
+    # Make sure we are always at the same place.
+    cd ${configdir}
+
+    # We always use the same umask. If a function wants to do
+    # different, fine, but we reset.
+    umask 022
+
+    touch "${STAGEFILE}"
+
+    if [[ -n ${TIME} ]]; then
+        log_timestamp "${TIME}"
+    fi
+
+    rm -f "${STAGEFILE}.log"
+
+    log "########## ${PROGRAM} END: ${FUNC} ##########"
+
+    if [[ -f ${LOCK_STOP} ]]; then
+        log "${LOCK_STOP} exists, exiting immediately"
+        exit 42
+    fi
+}
+

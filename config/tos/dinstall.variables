@@ -1,0 +1,35 @@
+# -*- mode:sh -*-
+# usually we are not using debug logs. Set to 1 if you want them.
+DEBUG=0
+
+# How many logfiles to keep
+LOGROTATE=${LOGROTATE:-400}
+
+# Not really a lockfile, but convenient dir
+# Marker for dinstall start
+DINSTALLSTART="${lockdir}/dinstallstart"
+# Marker for dinstall end
+DINSTALLEND="${lockdir}/dinstallend"
+
+# Timestamp for start
+DINSTALLBEGIN="$(date -u +"%a %b %d %T %Z %Y (%s)")"
+
+# Statefile for the users
+DINSTALLSTATE="${webdir}/dinstall.status"
+
+# dists for which we import external data (i18n, dep11)
+# as thats usually testing and unstable, but we need codenames,
+# get em out of the db.
+extimportdists=""
+if [ "${functionname}" = ftp-master.debian.org ]; then
+  for suite in testing unstable; do
+    codename=$(dak admin suite-config get-value ${suite} codename)
+    extimportdists="${extimportdists} ${codename}"
+  done
+fi
+
+# Common wget options
+wgetopts="-t2 -T20 -q -N --ca-directory=/etc/ssl/ca-debian"
+
+# dinstall wants timestamps added to stage logs
+TIMESTAMP=true

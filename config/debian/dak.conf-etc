@@ -1,0 +1,19 @@
+Config
+{
+  fasolo.debian.org
+  {
+    AllowLocalConfig    "false";
+    DakConfig           "/srv/ftp-master.debian.org/dak/config/debian/dak.conf";
+  }
+  coccia.debian.org
+  {
+    AllowLocalConfig    "false";
+    DakConfig           "/srv/ftp-master.debian.org/dak/config/debian/dak.conf";
+  }
+  usper.debian.org
+  {
+    AllowLocalConfig    "false";
+    DakConfig           "/srv/ftp-master.debian.org/dak/config/debian/dak.conf";
+  }
+}
+

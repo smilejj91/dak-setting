@@ -1,0 +1,54 @@
+#!/bin/bash
+
+set -e
+
+# Create the database that will be used by the fixtures, populating it with the
+# default data.  Also create a test dak directory.
+
+# After that, run all dbtests
+
+# At the end, clean up.
+
+if [[ ! -v DAK_ROOT ]]; then
+  DAK_ROOT="$(cd $(dirname "$0")/..; pwd)"
+fi
+export PGDATABASE=test_projectb
+
+if [[ ! -v DAK_INTEGRATION_TEST ]]; then
+  SYS_CMD="sudo"
+  KEEP_ENV_OPT="-E"
+  USER_CMD="sudo -u dak PGDATABASE=${PGDATABASE} DAKBASE=${DAKBASE}"
+  PYTHON_COVERAGE=
+else
+  SYS_CMD=""
+  KEEP_ENV_OPT=""
+  USER_CMD=""
+  if [ "$RUN_COVERAGE" = "y" ]; then
+      PYTHON_COVERAGE="python3-coverage run --rcfile ${DAK_ROOT}/.coveragerc --parallel-mode"
+  else
+      PYTHON_COVERAGE=
+  fi
+fi
+
+test-setup() {
+  # Create the database as expected by the tests
+  export DAKBASE=$(mktemp -d)
+  export HOME="${DAKBASE}/home"
+  ${DAK_ROOT}/setup/dak-setup.sh
+  mkdir "$HOME" || exit $?
+}
+
+test-cleanup() {
+  echo Dropping DB ${PGDATABASE}
+  $USER_CMD $KEEP_ENV_OPT dropdb ${PGDATABASE}
+  echo Deleting temporary directory
+  $SYS_CMD rm -rf -- ${DAKBASE}
+}
+
+# Unless --nocleanup is passed, the script will cleanup at the end.
+if [[ "$1" != "--nocleanup" ]]; then
+	trap test-cleanup EXIT
+fi
+
+test-setup
+$USER_CMD $PYTHON_COVERAGE ${DAK_ROOT}/tests/dbtest_all.py

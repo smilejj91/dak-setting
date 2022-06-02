@@ -1,0 +1,14 @@
+#!/bin/sh
+
+set -e
+set -u
+
+echo "Creating components"
+
+psql << EOF
+COPY component (name, description, meets_dfsg) FROM stdin;
+main	Main	t
+contrib	Contrib	t
+non-free	Software that fails to meet the DFSG	f
+\.
+EOF

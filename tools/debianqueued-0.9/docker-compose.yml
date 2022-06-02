@@ -1,0 +1,13 @@
+version: '3.2'
+
+services:
+  tmax-uploadqueue:
+    image: harbor.tmaxos.net/infra/tmax-uploadqueue:1.0.0
+    container_name: tmax-uploadqueue-cont
+    ports:
+      - "21:21" # for ftp upload
+      - "2022:22" # for dak rsync
+    volumes:
+      - type: "bind"
+        source : "/srv/upload.tmaxos.net"
+        target : "/srv/upload.tmaxos.net"

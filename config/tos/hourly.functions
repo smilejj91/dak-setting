@@ -1,0 +1,89 @@
+# -*- mode:sh -*-
+
+function importusers() {
+    dak import-users-from-passwd
+}
+
+function newoverview() {
+    do_new
+    #log "Output html for packages in NEW"
+    #dak show-new > /dev/null || true
+}
+
+function do_report() {
+    local target=${1:-"${webdir}/new.html"}
+    local opts=${2:-"-n"}
+    local TMPOUT=$( mktemp -p "${TMPDIR}" reportout.XXXXXX )
+    TMPFILES="${TMPFILES} ${TMPOUT}"
+    dak queue-report ${opts} > ${TMPOUT}
+    chmod 644 ${TMPOUT}
+    mv -f ${TMPOUT} ${target}
+}
+
+function queuereport() {
+    log "Creating queue reports, new/backports-new, 822 format"
+    #local queues="new,byhand,stable-new,oldstable-new"
+    local queues="new,byhand,stable-new"
+    local bpqueues="backports-new,backports-policy"
+    local gqueues="${queues},${bpqueues},deferred"
+    do_report
+    do_report ${webdir}/backports-new.html "-n -d ${bpqueues}"
+    dak queue-report -8 -d ${queues},${bpqueues} -r ${webdir}/stat
+    log "Graphs about the queues"
+    dak graph -n ${gqueues} -r ${webdir}/stat -i ${webdir}/stat -x ${scriptsdir}/rrd-release-freeze-dates
+}
+
+function removalstxt() {
+    cd ${webdir}
+    cat removals-20*.txt > removals-full.txt
+    cat removals.txt >> removals-full.txt
+    cat removals-20*.822 > removals-full.822
+    cat removals.822 >> removals-full.822
+}
+
+function rss() {
+    log "NEW RSS feed"
+    PYTHONHASHSEED=0 ${base}/dak/tools/queue_rss.py -q ${queuedir}/new -o ${webdir}/rss/ -d ${base}/misc -l ${base}/log/
+    log "Removals RSS feed"
+    ${base}/dak/tools/removals.pl ${configdir}/removalsrss.rc > ${webdir}/rss/removals.rss
+}
+
+function gen_di() {
+    ${scriptsdir}/generate-d-i
+}
+
+function backportsacl() {
+    # Update backports ACL
+    sudo -u dak-unpriv cat /srv/backports-master.debian.org/etc/acl \
+        | dak acl set-fingerprints backports \
+        | mail -a "X-Debian: DAK" -e -s "backports: acl changes" -a "From: Debian FTP Masters <ftpmaster@ftp-master.debian.org>" backports-team@debian.org
+}
+
+# do the buildd key updates
+function builddautosigning() {
+    BUILDDFUN=$( gettempfile )
+    local what=${1:-"none"}
+    exec >> "${BUILDDFUN}" 2>&1
+    if [[ ${what} == none ]]; then
+        ${scriptsdir}/buildd-remove-keys
+        ${scriptsdir}/buildd-add-keys
+        ${scriptsdir}/buildd-prepare-dir
+    fi
+
+    for keyring in $(dak admin k list-binary); do
+        dak import-keyring --generate-users "%s" ${keyring}
+    done
+    exec >>/dev/null 2>&1
+
+    DATE=$(date -Is)
+    mail -a "X-Debian: DAK" -e -s "[${HOSTNAME}] Buildd key changes ${DATE}" -a "From: Debian FTP Masters <ftpmaster@ftp-master.debian.org>" buildd-keys@ftp-master.debian.org < "${BUILDDFUN}"
+
+    rm -f "${BUILDDFUN}"
+}
+
+function updateweb() {
+    cd ${webdir}
+    git clean -fd
+    git reset --hard
+    git pull
+}

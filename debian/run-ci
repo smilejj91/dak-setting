@@ -1,0 +1,172 @@
+#! /bin/bash
+#
+# © 2018 Ansgar Burchardt <ansgar@debian.org>
+# © 2020 Ivo De Decker <ivodd@debian.org>
+# License: GPL-2+
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+# start/end collapsible sections in GitLab's CI
+# Reference: https://docs.gitlab.com/ee/ci/pipelines/#custom-collapsible-sections
+section_start() {
+    local name header
+    name="${1:?}"
+    header="${2:-}"
+    echo -e "section_start:$(date +%s):${name}\r\e[0K\e[36;1m${header}\e[0;m"
+}
+
+section_end() {
+    local name
+    name="${1:?}"
+    echo -e "section_end:$(date +%s):${name}\r\e[0K"
+}
+
+run_apt-get() {
+    if [ "$UID" = 0 ]
+    then
+        apt-get $@
+    else
+        echo not running apt-get $@
+    fi
+}
+
+# salsa ci total number of parallel jobs
+if [[ ! -v CI_NODE_TOTAL ]]; then
+    export CI_NODE_TOTAL=1
+fi
+# salsa ci number for this specific job (from 1 to $CI_NODE_TOTAL)
+if [[ ! -v CI_NODE_INDEX ]]; then
+    export CI_NODE_INDEX=1
+fi
+if [[ ! -v CI ]]; then
+    CI=false
+fi
+
+MY_CI_COUNTER=0
+
+run_this_test() {
+    MY_MODULO=$(( $MY_CI_COUNTER % $CI_NODE_TOTAL + 1 ))
+    echo "run_this_test: $MY_MODULO $MY_CI_COUNTER"
+    MY_CI_COUNTER=$(( MY_CI_COUNTER + 1 ))
+    [[ $MY_MODULO = $CI_NODE_INDEX ]]
+}
+
+if [ "x$1" = "x--with-coverage" ]; then
+    RUN_COVERAGE=y
+    PYTEST_COV_OPTIONS=" --cov-branch --cov --cov-report= "
+    shift
+else
+    RUN_COVERAGE=
+    PYTEST_COV_OPTIONS=""
+fi
+
+export RUN_COVERAGE
+
+copy_coverage_data() {
+    t="$1"
+    if [ "$RUN_COVERAGE" = "y" ]; then
+        TESTNAME=${t##*/}
+        DESTDIR=${DAK_CI_OUTPUT_DIR}/coveragedata/data_${TESTNAME}
+        echo copy coverage data for $TESTNAME to $DESTDIR
+        mkdir -p $DESTDIR
+        [ -e .coverage ] && cp .coverage $DESTDIR/.coverage.data.${TESTNAME/}
+        cp .coverage.* $DESTDIR || true
+    fi
+}
+
+set -eu
+
+if [ ! -f dak/dak.py ]; then
+  echo >&2 "E: run-ci must be invoked in the root directory of dak"
+  exit 1
+fi
+
+export BASEDIR="$(cd $(dirname "${BASH_SOURCE}")/..; pwd)"
+export DAK_ROOT=$BASEDIR
+
+export DAK_CI_OUTPUT_DIR=${BASEDIR}/output
+mkdir -p ${DAK_CI_OUTPUT_DIR}
+LOGFILE=${DAK_CI_OUTPUT_DIR}/log_job${CI_NODE_INDEX}.txt
+
+section_start "install_dep[collapsed=true]" "Install Dependencies"
+echo `date` installing packages | tee -a $LOGFILE
+
+run_apt-get update
+run_apt-get install -y build-essential
+run_apt-get build-dep -y .
+
+section_end install_dep
+
+mkdir -p $DAK_ROOT/test-gnupghome
+export GNUPGHOME=${DAK_ROOT}/test-gnupghome
+
+cd ${DAK_ROOT}
+
+section_start unit_tests "Unit Tests"
+
+if run_this_test; then
+    echo `date` running unit tests | tee -a $LOGFILE
+    py.test-3 -v ${PYTEST_COV_OPTIONS} daklib tests
+    copy_coverage_data "unit_tests"
+    echo `date` unit tests done | tee -a $LOGFILE
+else
+    echo "not running unit tests in this job ($CI_NODE_INDEX/$CI_NODE_TOTAL)"
+fi
+
+section_end unit_tests
+
+section_start "fixtures[collapsed=true]" "Creating Fixtures"
+
+echo `date` making fixtures | tee -a $LOGFILE
+make -C tests/fixtures/packages
+echo `date` making fixtures done | tee -a $LOGFILE
+
+section_end fixtures
+
+section_start integration_tests "Integration Tests"
+
+TESTS="${DAK_ROOT}/integration-tests/tests/[0-9]*[^~] \
+    ${DAK_ROOT}/tests/run-dbtests"
+
+for t in $TESTS
+do
+    if run_this_test; then
+        section_start "${t}" "Running test ${t}"
+        echo `date` running $t | tee -a $LOGFILE
+        ./integration-tests/run-tests $t
+        copy_coverage_data $t
+        echo `date` running $t done | tee -a $LOGFILE
+        section_end "${t}"
+    else
+        echo "not running test $t in this job ($CI_NODE_INDEX/$CI_NODE_TOTAL)"
+    fi
+done
+
+section_end integration_tests
+
+# On the gitlab CI, there is a separate job for generating the
+# coverage report.  That provides the total coverage.  Unfortunately,
+# these partial coverage reports causes Gitlab to compute an average
+# of all totals, which gives a weird coverage percentage that does not
+# reflect the true coverage rating.
+if [ "$RUN_COVERAGE" = "y" ] && [ "${CI}" = "false" ]; then
+    section_start coverage "Coverage Report"
+    python3-coverage combine --append
+    python3-coverage report -m
+    echo
+    python3-coverage html -d ${BASEDIR}/coverage
+    python3-coverage annotate -d ${BASEDIR}/coverage/annotated
+    section_end coverage
+fi
+echo `date` all done | tee -a $LOGFILE

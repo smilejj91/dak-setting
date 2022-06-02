@@ -1,0 +1,47 @@
+Use common-debian-service-https-redirect * ftp-master.debian.org
+
+<VirtualHost *:443>
+  ServerName ftp-master.debian.org
+  DocumentRoot /srv/ftp.debian.org/web
+
+  CustomLog               /var/log/apache2/ftp-master-access.log privacy
+  ErrorLog                /var/log/apache2/ftp-master-error.log
+
+  Use common-debian-service-ssl ftp-master.debian.org
+  Use common-ssl-HSTS
+  Use http-pkp-ftp-master.debian.org
+
+  Redirect permanent /proposed-updates.html https://release.debian.org/proposed-updates/stable.html
+  Redirect permanent /oldstable-proposed-updates.html https://release.debian.org/proposed-updates/oldstable.html
+  Redirect permanent /testing/hints/transitions.yaml https://ftp-master.debian.org/transitions.yaml
+  Redirect permanent /git/archvsync.git https://salsa.debian.org/mirror-team/archvsync
+  Redirect permanent /git/dak.git https://salsa.debian.org/ftp-team/dak.git
+  Redirect permanent /git/dakbot.git https://salsa.debian.org/ftp-team/dakbot.git
+  Redirect permanent /git/presentations.git https://salsa.debian.org/ftp-team/presentations.git
+  Redirect permanent /git/website.git https://salsa.debian.org/ftp-team/website.git
+  Redirect permanent /epydoc https://ftp-team.pages.debian.net/dak/epydoc
+  Alias /users/ /srv/ftp.debian.org/web-users/
+  Alias /static/lintian.tags /srv/ftp-master.debian.org/dak/config/debian/lintian.tags
+
+  <Directory /srv/ftp.debian.org/web-users>
+    Require all granted
+    AllowOverride FileInfo AuthConfig Limit Indexes
+    Options MultiViews Indexes SymLinksIfOwnerMatch
+  </Directory>
+
+  <Directory /srv/ftp.debian.org/web>
+    Require all granted
+    AddCharset utf-8 .txt
+    Options MultiViews Indexes SymLinksIfOwnerMatch
+  </Directory>
+
+  <Directory /srv/ftp-master.debian.org/dak/config/debian>
+    <Files lintian.tags>
+      Require all granted
+    </Files>
+  </Directory>
+
+  RewriteEngine On
+  RewriteRule ^/~(.+) /users/$1 [R=permanent,L]
+  RewriteRule ^/testing/(.*) https://release.debian.org/britney/$1 [R=permanent,L]
+</VirtualHost>

@@ -1,0 +1,14 @@
+#!/bin/sh
+
+set -e
+set -u
+
+echo "Creating override types"
+
+psql << EOF
+COPY override_type (type) FROM stdin;
+deb
+udeb
+dsc
+\.
+EOF

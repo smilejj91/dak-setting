@@ -1,0 +1,14 @@
+#!/bin/sh
+
+set -e
+set -u
+
+echo "Setting up source formats"
+
+psql << EOF
+COPY src_format (format_name) FROM stdin;
+1.0
+3.0 (quilt)
+3.0 (native)
+\.
+EOF

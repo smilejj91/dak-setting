@@ -1,0 +1,74 @@
+# -*- mode: sh -*-
+#
+# © 2017-2018 Ansgar Burchardt <ansgar@debian.org>
+# License: GPL-2+
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+if [[ ! -v DAK_INTEGRATION_TEST || ! -v DAK_ROOT ]]; then
+  exit 1
+fi
+
+test-setup() {
+  local setupdir="${DAK_ROOT}/setup"
+
+  . ${DAK_ROOT:?}/integration-tests/common
+
+  section_start "setup_dak_installation[collapsed=true]" "Prepare DAK"
+
+  export DAKBASE=$(mktemp -d)
+  export HOME="${DAKBASE}/home"
+  export DAKHOST=dak-master
+  export PGDATABASE=projectb
+
+  mkdir "$HOME" || exit $?
+  ${setupdir}/dak-setup.sh
+
+  export PATH="${DAKBASE}/bin:${PATH}"
+  export DAK_CONFIG="${DAKBASE}/etc/dak.conf"
+  export GNUPGHOME="${DAKBASE}/gpg"
+  cp -a "${DAK_ROOT}/tests/fixtures/packages/gpg" "${GNUPGHOME}"
+  chmod 0700 "${GNUPGHOME}"
+  echo "Dinstall::SigningHomedir \"${GNUPGHOME}\";" >> "${DAK_CONFIG}"
+
+  section_end setup_dak_installation
+}
+
+test-cleanup() {
+  if [[ -v DAKBASE ]]; then
+    # Ensure we stop the gpg-agent to avoid leaving processes running
+    gpg-connect-agent --homedir "${GNUPGHOME}" KILLAGENT /bye
+    rm -rf -- "${DAKBASE}"
+  fi
+}
+
+if [[ ! -v DAK_INTERACTIVE_SHELL ]]; then
+    trap test-cleanup EXIT
+    test-setup
+fi
+
+if [ "$0" = "${BASH_SOURCE}" ] ; then
+    echo "============= STARTING interactive dak integration test shell ==========="
+    echo
+    echo "Run psql for accessing projectb"
+    echo "Run dak commands via \"dak <cmd>\""
+    echo "Note that some data (e.g. postgres and dak.conf) will be discarded at"
+    echo "the end of the run"
+    echo
+    echo "You may want to run \"make -C tests/fixtures/packages\" and"
+    echo "\"integration-tests/tests/0001-basic\" test to import some basic data"
+    echo
+    DAK_INTERACTIVE_SHELL=1 "${SHELL}" -s
+    echo "============= STOPPING interactive dak integration test shell ==========="
+fi

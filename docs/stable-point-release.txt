@@ -1,0 +1,221 @@
+Rough Guide to doing Stable Point Releases in Debian
+----------------------------------------------------
+
+TRY THE NEW pointrelease SCRIPT INSTEAD!
+
+- Mirror tmux session on public host:
+#   ssh ftp-master.debian.org 'tail -f -c +0 ~dak/tmuxoutput.1-0' | ssh mirror.ftp-master.debian.org 'cat > tmuxout'
+
+- sudo to dak
+- bash:
+suitename=jessie
+newrev=8.7
+
+export SCRIPTVARS=/srv/ftp-master.debian.org/dak/config/debian/vars
+. $SCRIPTVARS
+. "${configdir}/common"
+. "${configdir}/dinstall.functions"
+umask 022
+export LANG=C
+export LC_ALL=C
+
+suite=$(psql -qAtc "SELECT suite_name FROM suite WHERE codename='${suitename}'")
+oldrev=$(psql -qAtc "SELECT version FROM suite WHERE codename='${suitename}'")
+case "${suite}" in
+  stable)    pusuite=proposed-updates ;;
+  oldstable) pusuite=oldstable-proposed-updates ;;
+  *)         pusuite=INVALID ;;
+esac
+
+echo "Point release for ${suite} (${suitename}); old version: ${oldrev}, new: ${newrev}"
+echo "Updates come from ${pusuite}"
+
+pg_timestamp pre_${suite}_${newrev}
+cd ~
+mkdir -p ${suitename}_${newrev}
+cd ${suitename}_${newrev}
+dak control-suite -l ${pusuite} > ${pusuite}.list
+dak control-suite -l ${suite} > ${suite}.list
+
+- ask SRMs if there is anything to be skipped from this release. If so
+  edit ${pusuite}.list (and later the Changelog too)
+- bash:
+# skip: list of *source* packages to skip, whitespace separated
+skip=""
+if [ -n "${skip}" ]; then
+  mv ${pusuite}.list ${pusuite}.list.ori
+  grep -vFf <(dak ls -f heidi -S -s ${pusuite} ${skip}) ${pusuite}.list.ori > ${pusuite}.list
+fi
+
+tmpfile=$(mktemp -p "${TMPDIR}" changelog.XXXXXX)
+dak make-changelog -s ${pusuite} -b ${suite} | cat - ${ftpdir}/dists/${suite}/ChangeLog > ${tmpfile}
+chmod 0644 ${tmpfile}
+mv ${tmpfile} ${ftpdir}/dists/${suite}/ChangeLog
+if [ -n "${skip}" ]; then
+  $EDITOR ${ftpdir}/dists/${suite}/ChangeLog
+fi
+
+dak control-suite --add ${suite} < ${pusuite}.list
+dak control-suite --remove ${pusuite} < ${pusuite}.list
+
+- clean up *.changes from proposed-updates:
+# Be careful if uploads were not included in the point release.
+pumorguedir="${base}/morgue/queues/$(date +%Y/%m)"
+mkdir -p "${pumorguedir}"
+cd ${ftpdir}/dists/${pusuite}
+mv -t "${pumorguedir}" -n -- *.changes
+if [ -n "${skip}" ]; then
+    for pack in ${skip}; do
+        mv -t "${ftpdir}/dists/${pusuite}" ${pumorguedir}/${pack}*.changes
+    done
+fi
+
+# do r0 and propups, if any
+cd ~/${suitename}_${newrev}
+# rsync data to from-release.d.o
+#   from /srv/release.debian.org/www/${suitename}/${newrev%%.*}/${newrev}
+control_r0=from-release.d.o/${suitename}-r0-additions.cs
+if [[ -f ${control_r0} ]]; then
+    cp ${control_r0} .
+    read -p "Please check ${control_r0##*/}"
+    dak control-suite --add ${suitename}-r0 < ${suitename}-r0-additions.cs
+fi
+control_unstable=from-release.d.o/propups.unstable
+if [[ -f ${control_unstable} ]]; then
+    cp ${control_unstable} .
+    read -p "Please check ${control_unstable##*/}"
+    dak control-suite --force --add unstable <propups.unstable
+fi
+control_testing=from-release.d.o/propups.testing
+if [[ -f ${control_testing} ]]; then
+    cp ${control_testing} .
+    read -p "Please check ${control_testing##*/}"
+    dak control-suite --force --add testing <propups.testing
+fi
+
+- ask rms if they have RMs to do.
+# dak rm -s ${suite} -R -p -d ### -m '###' ###
+- Copy in entries from /srv/ftp.debian.org/web/removals.txt:
+# $EDITOR ${ftpdir}/dists/${suite}/ChangeLog
+
+- and then check if they have a d-i update. if so, bash:
+diver=20150422+deb8u4+b2
+dak copy-installer -s ${pusuite} -d ${suite} ${diver}
+
+# set dioldver to "empty" if there is no old to remove
+dioldver=20150422+deb8u4+b1
+if [ "${dioldver}" != "empty" ]; then
+    cd $ftpdir/dists/${suite}/main
+    for iarch in $(dak admin s-a list-arch ${suite}); do
+        if [ -d "installer-${iarch}/${dioldver}" ]; then
+            echo "Moving installer-${iarch}/${dioldver} to morgue"
+            mkdir -p "${base}/morgue/d-i/installer-${iarch}/"
+            mv "installer-${iarch}/${dioldver}" "${base}/morgue/d-i/installer-${iarch}/"
+        fi
+    done
+
+    # Remove old version also from proposed-updates
+    cd $ftpdir/dists/${pusuite}/main
+    for iarch in $(dak admin s-a list-arch ${suite}); do
+        rm -rf -- "installer-${iarch}/${dioldver}"
+    done
+fi
+cd $ftpdir/dists/${suite}
+
+- Updates for win32-loader?
+cd ${ftpdir}/tools/win32-loader
+if [ -d ${suitename}-proposed-updates ]; then
+    rm -r ${suite}
+    mv ${suitename}-proposed-updates ${suite}
+fi
+cd ${ftpdir}
+
+- Update version number in README, README.html and dists/README,
+  Clean up dists/stable/ChangeLog (add header, basically). bash:
+
+cd ${ftpdir}/dists/${suite}
+
+date_long=$(date "+%A, %-dth %B %Y" | sed 's/1th/1st/; s/2th/2nd/; s/3th/3rd/')
+date_iso=$(date "+%Y-%m-%d")
+date_short=$(date "+%a, %d %b %Y")
+sed -e "1i======================================\n${date_short} - Debian ${newrev} released\n======================================" -i ChangeLog
+sed -e "/^${suite}/ s/Debian ${oldrev}/Debian ${newrev}/" -i ../README
+sed -e "s/Debian ${oldrev}/Debian ${newrev}/g; /Debian ${newrev}/ s/released .*\\./released ${date_long}./" -i ../../README
+sed -e "s/Debian ${oldrev}/Debian ${newrev}/g; /Debian ${newrev}/ s/released .*\\./released ${date_long}./; /meta name=\"Modified\"/ s/content=\".*\"/content=\"${date_iso}\"/" -i ../../README.html
+
+# Inspect changes. Regular expressions might be a bit fragile.
+for f in README README.html dists/README dists/${suite}/ChangeLog; do
+  diff -u ${mirrordir}/ftp-master/${f} ${ftpdir}/${f}
+done
+
+# If changes are needed:
+cd ${ftpdir}/dists/${suite}
+$EDITOR ChangeLog ../README ../../README ../../README.html
+rm -f -- ./*~ ../*~ ../../*~
+
+- Update the 'Debian<n>.<n>r<n>' symlink in dists/
+cd $ftpdir/dists/
+rm -f Debian${oldrev}
+ln -s ${suitename} Debian${newrev}
+
+- Update fields in suite table in postgresql.
+  bash:
+
+mdate=$(date +"%d %B %Y")
+psql projectb <<EOF
+begin;
+update suite set version = '${newrev}' where suite_name = '${suite}';
+update suite set description = 'Debian ${newrev} Released ${mdate}' where suite_name = '${suite}';
+commit;
+EOF
+
+- prepare for gps. bash:
+dak dominate --force -s ${suite}
+- check output from cruft report:
+dak cruft-report -s ${suite}
+- if cruft was removed: go back to run dominate again
+
+- if cruft was removed: update changelog from /srv/ftp.debian.org/web/removals.txt:
+# $EDITOR ${ftpdir}/dists/${suite}/ChangeLog
+
+- Let SRM see if all is ok
+
+- then:
+dak generate-packages-sources2 --force -s ${suite},${pusuite}
+dak contents generate -f -s ${suite} -a ftp-master
+
+${scriptsdir}/sync-release ${suitename}
+
+- For wheezy: update main/i18n/Index
+if [[ ${suitename} == wheezy ]]; then
+  ${scriptsdir}/generate-i18n-Index "${ftpdir}/dists/${suite}"
+fi
+
+- Generate Releases:
+dak generate-releases -f -s ${suite} ${pusuite}
+# Remove InRelease: Release can be signed by both ftpmaster & stable release keys
+rm ${ftpdir}/dists/${suite}/InRelease
+${scriptsdir}/sync-release ${suitename}
+
+cd ${ftpdir}/dists/${suite}
+while :; do
+    if [[ -f /srv/release.debian.org/www/${suitename}/${newrev%%.*}/${newrev}/Release-${newrev}.gpg ]]; then
+        cat /srv/release.debian.org/www/${suitename}/${newrev%%.*}/${newrev}/Release-${newrev}.gpg >> Release.gpg
+        gpg --no-default-keyring --keyring /usr/share/keyrings/debian-archive-keyring.gpg --trust-model=always --verify Release.gpg Release
+        break
+    else
+        sleep 10
+        continue
+    fi
+done
+echo "Done"
+
+wget --ca-directory=/etc/ssl/ca-debian https://release.debian.org/proposed-updates/8/8.7/Release-${newrev}.gpg
+cat Release-${newrev}.gpg >> ${ftpdir}/dists/${suite}/Release.gpg
+cd ${ftpdir}/dists/${suite}
+gpg --no-default-keyring --keyring /usr/share/keyrings/debian-archive-keyring.gpg --trust-model=always --verify Release.gpg Release
+
+
+- Check if a mirror push is needed or next dinstall is enough. for a push, bash:
+cd
+${configdir}/cronscript mirror

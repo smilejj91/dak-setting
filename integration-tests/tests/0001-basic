@@ -1,0 +1,97 @@
+#! /bin/bash
+#
+# © 2017 Ansgar Burchardt <ansgar@debian.org>
+# License: GPL-2+
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+set -e
+set -u
+
+. ${DAK_ROOT:?}/integration-tests/common
+. ${DAK_ROOT:?}/integration-tests/setup
+
+# add a unstable suite with amd64
+dak admin architecture add amd64 AMD64
+dak admin suite add unstable "" codename=sid
+dak admin suite-architecture add unstable source all amd64
+dak admin suite-component add unstable main contrib non-free
+
+(
+  suites="$(dak admin suite list | sort | xargs)"
+  suites_e="byhand new unstable"
+  assert-equal "dak admin suite list" "${suites}" "${suites_e}"
+)
+
+(
+  unstable_archs="$(dak admin s-a list-arch unstable | sort | xargs)"
+  assert-equal "dak admin s-a list-arch unstable" "${unstable_archs}" "amd64"
+)
+
+(
+  cs_unstable="$(dak control-suite -l unstable)"
+  assert-equal "dak control-suite -l unstable" "${cs_unstable}" ""
+)
+
+(
+  co_unstable="$(dak control-override -l unstable)"
+  assert-equal "dak control-override -l unstable" "${co_unstable}" ""
+)
+
+(
+  dak control-overrides -s unstable -t deb -a << EOF
+package required admin
+EOF
+  dak control-overrides -s unstable -t dsc -a << EOF
+package admin
+EOF
+)
+
+(
+  packages=$(fixture-package-dir)
+  import-fixture-signing-key
+
+  cp ${packages:?}/nonfree-package_* ${packages:?}/package_0.1* ${DAKBASE}/tmp
+
+  dak process-upload -d ${DAKBASE}/tmp --automatic
+)
+
+(
+  dak contents scan-binary
+  dak contents scan-source
+)
+
+(
+  dak generate-packages-sources2 -s unstable
+  dak contents generate -a dak-master -s unstable
+  dak generate-release -s unstable
+)
+
+check_all_suites after_accept
+
+(
+  dak rm -n -s unstable package
+)
+
+(
+  export REASON="not accepted"
+  unset VISUAL
+  export EDITOR=integration-tests/reject-editor
+  # M: manual reject, R: reject
+  printf "M\nR\n" | dak process-new nonfree-package_0.1-1_amd64.changes
+
+  dak process-new --automatic
+  dak process-policy new
+)
+

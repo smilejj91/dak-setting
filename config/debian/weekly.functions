@@ -1,0 +1,27 @@
+# -*- mode:sh -*-
+
+function purgeempty() {
+    log "Purging empty directories"
+    local archiveroot
+
+    for archive in "${public_archives[@]}"; do
+        log "... archive: ${archive}"
+        archiveroot="$(get_archiveroot "${archive}")"
+
+        # FIXME: double find
+        if [ ! -z "$(find ${archiveroot}/pool/ -type d -empty)" ]; then
+            find ${archiveroot}/pool/ -type d -empty | xargs rmdir;
+        fi
+    done
+}
+
+function fixsymlinks() {
+    log "Fixing symlinks"
+    local archiveroot
+
+    for archive in "${public_archives[@]}"; do
+        log "... archive: ${archive}"
+        archiveroot="$(get_archiveroot "${archive}")"
+        symlinks -d -r ${archiveroot}
+    done
+}

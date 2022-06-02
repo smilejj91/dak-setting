@@ -1,0 +1,42 @@
+#! /bin/bash
+#
+# Executed after cron.unchecked
+
+set -e
+set -o pipefail
+set -u
+
+export SCRIPTVARS=/srv/security-master.debian.org/dak/config/debian-security/vars
+. $SCRIPTVARS
+DISTS="oldoldstable oldstable stable testing-security"
+
+if [ -e $ftpdir/Archive_Maintenance_In_Progress ]; then
+    exit 0
+fi
+
+last_changed=${1:?}
+
+trigger_wb() {
+    local dist="${1:?}"
+    local send=
+
+    case "${dist}" in
+        oldoldstable|oldstable|stable|testing-security)
+            send=$(dak admin suite-config get-value "${dist}" codename)
+            send=${send%-security}
+            ;;
+        *)
+            send=unknown
+            ;;
+    esac
+
+    echo "triggering w-b for suite ${dist} (known as ${send} by w-b)"
+    ssh -n wbadm@buildd trigger.security $send
+}
+
+for dist in $DISTS; do
+    dist_changed=$(psql -qAtc "SELECT BOOL_OR(last_changed > '${last_changed}') FROM suite WHERE suite_name IN ('${dist}', 'buildd-${dist}')")
+    if [[ "${dist_changed}" = "t" ]]; then
+        trigger_wb ${dist}
+    fi
+done

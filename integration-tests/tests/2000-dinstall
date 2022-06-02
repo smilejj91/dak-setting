@@ -1,0 +1,105 @@
+#! /bin/bash
+#
+# © 2019 Niels Thykier <niels@thykier.net>
+# License: GPL-2+
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+set -e
+set -u
+
+. ${DAK_ROOT:?}/integration-tests/common
+. ${DAK_ROOT:?}/integration-tests/setup
+. ${DAK_ROOT:?}/integration-tests/dinstall
+
+echo "Dinstall::AllowSourceOnlyUploads true;" >> ${DAKBASE}/etc/dak.conf
+
+setup_debian_like_archive
+import-fixture-signing-key
+
+# Verify that our dinstall works with an empty archive
+dinstall
+
+
+(
+  packages=$(fixture-package-dir)
+
+  upload_changes ${packages:?}/nonfree-package_0.1-1_amd64.changes
+  upload_changes ${packages:?}/package_0.1-1_amd64.changes
+  upload_changes ${packages:?}/main-contrib-with-debug_0.1-1_amd64.changes
+
+  process_uploads
+)
+
+echo "Verifying that packages in NEW are *not* published"
+if ls -l ${DAKBASE}/ftp-master/pool/main/p/package/package_*.dsc 2>/dev/null ; then
+    # We never acepted it, so it should not be published!
+    echo "package has been publish even though it is still in NEW!?" >&2
+    dak ls package
+    exit 1
+fi
+
+echo "OK; accepting the package and running dinstall to see it become published"
+
+# Accept the package from NEW
+(
+
+  dak control-overrides -s unstable -t deb -a << EOF
+package required admin
+EOF
+  dak control-overrides -s unstable -t dsc -a << EOF
+package admin
+EOF
+
+echo a | dak process-new main-contrib-with-debug_0.1-1_amd64.changes
+  
+  dak process-new --automatic
+  dak process-policy new
+)
+
+to_testing="$(cat <<EOF
+contrib-with-debug 0.2-1 amd64
+main-contrib-with-debug 0.2-1 source
+main-package 0.2-1 all
+package 0.1-1 all
+package 0.1-1 source
+EOF
+)"
+
+(
+  upload_changes ${packages:?}/main-contrib-with-debug_0.2-1_amd64.changes
+  process_uploads
+
+  dak ls main-contrib-with-debug
+
+  echo "$to_testing" | dak control-suite -s testing
+
+)
+
+# we put the changelogs withing the ftp-master dir, so they will be checked by check_all_suites below
+psql -c "update archive set changelog='$DAKBASE/ftp-master/changelogs' where name='ftp-master';"
+dak make-changelog -e -a ftp-master
+
+# After running dinstall, the package should now be present in the pool
+dinstall
+ls -l ${DAKBASE}/ftp-master/pool/main/p/package/package_*.dsc
+echo "Published successfully"
+
+check_all_suites end
+
+dak ls main-contrib-with-debug
+
+# check that these packages have actually been published
+ls -l ${DAKBASE}/ftp-master/pool/main/m/main-contrib-with-debug/main-package_0.2-1_all.deb
+ls -l ${DAKBASE}/ftp-master/pool/contrib/m/main-contrib-with-debug/contrib-with-debug_0.2-1_amd64.deb

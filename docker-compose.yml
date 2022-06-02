@@ -1,0 +1,24 @@
+version: '3.2'
+
+services:
+  tmax-dak:
+    image: harbor.tmaxos.net/infra/tmax-dak:1.0.1
+    container_name: tmax-dak-cont
+    hostname: tos-ftp-master
+    volumes:
+      - .:/home/dak/dak
+      - /srv/dak-data:/var/lib/postgresql/data
+      - /srv/dak:/srv/dak
+  tmax-uploadqueue:
+    image: harbor.tmaxos.net/infra/tmax-uploadqueue:1.0.1
+    container_name: tmax-uploadqueue-cont
+    ports:
+      - "21:21" # for ftp upload
+      - "2022:22" # for dak rsync
+    volumes:
+      - type: "bind"
+        source : "/srv/upload.tmaxos.net"
+        target : "/srv/upload.tmaxos.net"
+    links:
+      - tmax-dak
+ 

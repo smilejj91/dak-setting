@@ -1,0 +1,144 @@
+# -*- mode: sh -*-
+#
+# © 2017 Ansgar Burchardt <ansgar@debian.org>
+# License: GPL-2+
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+if [[ -v testname ]]; then
+    return
+fi
+
+declare -r testname=`basename $0`
+
+section_start() {
+    local name header
+    name="${1:?}"
+    header="${2:-} (${testname})"
+    echo -e "section_start:$(date +%s):${testname}_${name}\r\e[0K\e[36;1m${header}\e[0;m"
+}
+
+section_end() {
+    local name
+    name="${1:?}"
+    echo -e "section_end:$(date +%s):${testname}_${name}\r\e[0K"
+}
+
+_escape_newline() {
+    echo "$1" | perl -pe 's/\n/\\n/g'
+}
+
+assert-equal() {
+  if [[ "${2}" != "${3}" ]]; then
+    local actual=$(_escape_newline "$2") expected=$(_escape_newline "$3")
+    echo "E: ${1} returned '${actual}' (expected: '${expected}')" >&2
+    exit 1
+  fi
+}
+
+fixture-package-dir() {
+    packages=${DAK_ROOT:?}/tests/fixtures/packages
+    echo "${packages}"
+}
+
+import-fixture-signing-key() {
+    packages=$(fixture-package-dir)
+    ln -sf ${packages:?}/gpg/pubring.gpg ${DAKBASE:?}/keyrings/upload-keyring.gpg
+    dak import-keyring -U "%s" ${DAKBASE}/keyrings/upload-keyring.gpg
+}
+
+check_all_suites() {
+    # list all suites and compare the control-suite output to the reference
+    # output from the repo
+    checkname=$1
+    if [ -z "$checkname" ]
+    then
+        echo "E: $testname: check_all_suites called without checkname"
+        exit 1
+    fi
+    csdir="${DAKBASE}/testoutput/$testname/$checkname"
+    refdir="${DAK_ROOT}/integration-tests/test-output/$testname/$checkname"
+    if [ ! -d "$refdir" ]
+    then
+        echo "E: $testname: dir $refdir missing"
+        exit 1
+    fi
+    suitesdir="$csdir/suites"
+    mkdir -p "$csdir/archives"
+    dak admin archive list | sort | while read archive pathinfo rest
+    do
+        pathinfo=${pathinfo#*=}
+        (
+            cd $pathinfo 2> /dev/null && (
+                find . | \
+                # replace the hashes with XXXX
+                perl -pe 's;(by-hash/[^/]*/)([0-9a-f]*)$;($1.('X' x length($2)));e' |\
+                # replace times with XXXX
+                perl -pe 's;(\d\d\d\d-\d\d-\d\d-\d\d\d\d.\d\d);XXXX-XX-XX-XXXX.XX;'
+            ) || true
+        ) | LANG=C sort > "$csdir/archives/$archive"
+    done
+    mkdir -p "$suitesdir"
+    dak admin s list | sort | while read suite
+    do
+        printf "\n\n$suite\n"
+        dak control-suite -l $suite | LANG=C sort | tee "$suitesdir/$suite"
+    done
+    if ! diff -Nur "$refdir" "$csdir"
+    then
+        echo "E: $testname $checkname: output different"
+        exit 1
+    fi
+}
+
+check_output() {
+    # run a command and compare the output to the reference output from the
+    # repo
+    checkname=$1
+    command="$2"
+    if [ -z "$command" ]
+    then
+        echo "E: $testname: check_output called without command"
+        exit 1
+    fi
+    ofile="${DAKBASE}/testoutput/$testname/commands/$checkname"
+    reffile="${DAK_ROOT}/integration-tests/test-output/$testname/commands/$checkname"
+    if [ ! -f "$reffile" ]
+    then
+        echo "E: $testname: file $reffile missing"
+        exit 1
+    fi
+    mkdir -p `dirname $ofile`
+    $command > $ofile
+    if ! diff -Nur "$reffile" "$ofile"
+    then
+        echo "E: $testname $checkname: output different"
+        exit 1
+    fi
+}
+
+save_ci_artifact() {
+    filename="$1"
+
+    if [ ! -d "${DAK_CI_OUTPUT_DIR:-}" ]
+    then
+        echo "DAK_CI_OUTPUT_DIR not set, not saving artifact $filename"
+        return
+    fi
+
+    destdir="${DAK_CI_OUTPUT_DIR}/$testname/"
+    mkdir -p "$destdir"
+
+    cp "$filename" "$destdir"
+}

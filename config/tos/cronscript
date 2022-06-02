@@ -1,0 +1,348 @@
+#!/bin/bash
+# No way I try to deal with a crippled sh just for POSIX foo.
+
+# Copyright (C) 2009-2016, 2018 Joerg Jaspert <joerg@debian.org>
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License as
+# published by the Free Software Foundation; version 2.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+
+# Homer: Are you saying you're never going to eat any animal again? What
+#        about bacon?
+# Lisa: No.
+# Homer: Ham?
+# Lisa: No.
+# Homer: Pork chops?
+# Lisa: Dad, those all come from the same animal.
+# Homer: Heh heh heh. Ooh, yeah, right, Lisa. A wonderful, magical animal.
+
+# exit on errors
+set -e
+# A pipeline's return status is the value of the last (rightmost)
+# command to exit with a non-zero status, or zero if all commands exit
+# successfully.
+set -o pipefail
+# make sure to only use defined variables
+set -u
+# ERR traps should be inherited from functions too. (And command
+# substitutions and subshells and whatnot, but for us the functions is
+# the important part here)
+set -E
+
+# If the extglob shell option is enabled using the shopt builtin,
+# several extended pattern matching operators are recognized. We use
+# it for the POSSIBLEARGS and the first case ${ARGS} matching.
+shopt -s extglob
+
+# And use one locale, no matter what the caller has set
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+
+# One arg please
+declare -lr ARG=${1:-"meh"}
+
+# program name is the (lower cased) first argument.
+PROGRAM="${ARG}"
+
+# import the general variable set. (This will overwrite configdir, but
+# it is expected to have the same value)
+export SCRIPTVARS=${configdir:?Please define configdir to run this script}/vars
+. ${SCRIPTVARS}
+
+# set DEBUG if you want to see a little more logs (needs to be used more)
+DEBUG=${DEBUG:-0}
+
+# Check if the argument is a known one. If so, lock us so that only
+# one copy of the type of cronscript runs. The $type.tasks file is
+# mandantory, so use that for locking.
+case ${ARG} in
+    ${POSSIBLEARGS})
+        # Only one of me should ever run.
+        FLOCKER=${FLOCKER:-""}
+        [[ ${FLOCKER} != ${configdir}/${PROGRAM}.tasks ]] && exec env FLOCKER="${configdir}/${PROGRAM}.tasks" flock -E 0 -en "${configdir}/${PROGRAM}.tasks" "$0" "$@" || :
+        ;;
+    *)
+        cat - <<EOF
+This is the cronscript. It needs an argument or it won't do anything
+for you.
+
+Currently accepted Arguments: ${POSSIBLEARGS}
+
+To see what they do, you want to look at the files
+\$ARGUMENT.{tasks,functions,variables} in ${configdir}.
+
+EOF
+        exit 0
+        ;;
+esac
+
+function includetasks() {
+    local NAME=${1:?}
+
+    _preparetasks ${NAME}
+    _runtasks ${NAME}
+}
+
+function _preparetasks() {
+    local NAME=${1:?}
+
+    # Each "cronscript" may have a variables and a functions file
+    # that we source
+    for what in variables functions; do
+        if [[ -f ${configdir}/${NAME}.${what} ]]; then
+            . ${configdir}/${NAME}.${what}
+        fi
+    done
+}
+
+function _runtasks() {
+    local NAME=${1:?}
+
+    # Which list of tasks should we run?
+    local TASKLIST="${configdir}/${NAME}.tasks"
+
+    # This loop simply wants to be fed by a list of values (see below)
+    # made out of 5 columns.
+    # The first four are the array values for the stage function, the
+    # fifth tells us if we should background the stage call.
+    #
+    #  - FUNC - the function name to call
+    #  - ARGS - Possible arguments to hand to the function. Can be the empty string
+    #  - TIME - The timestamp name. Can be the empty string
+    #  - ERR  - if this is the string false, then the call will be surrounded by
+    #           set +e ... set -e calls, so errors in the function do not exit
+    #           the script. Can be the empty string, meaning true.
+    #  - BG   - Background the function stage?
+    #
+    # ATTENTION: Spaces in arguments or timestamp names need to be escaped by \
+    #
+    # NOTE 1: There are special values for the first column (FUNC).
+    #         NOSTAGE - do not call stage function, call the command directly.
+    #         RMSTAGE - clean out the stages directory, and as such
+    #                   the recording what already ran in an earlier cronscript.
+    #                   Note: Only really makes sense at beginning of a tasks file,
+    #                   the stages directory gets cleared at successful exit anyways.
+    #                   RMSTAGE simply ensures that ALL of the crons tasks ALWAYS run.
+    #         INCLUDE - Runs another task list after including corresponding functions
+
+    # Note 2: If you want to hand an empty value to the stage function,
+    #         use the word "none" in the list below.
+    while read FUNC ARGS TIME ERR BACKGROUND; do
+        debug "FUNC: $FUNC ARGS: $ARGS TIME: $TIME ERR: $ERR BG: $BACKGROUND"
+
+        # Empty values in the value list are the string "none" (or the
+        # while read loop won't work). Here we ensure that variables that
+        # can be empty, are empty if the string none is set for them.
+        for var in ARGS TIME; do
+            if [[ ${!var} == none ]]; then
+                typeset ${var}=''
+            fi
+        done
+
+        # ERR/BACKGROUND are boolean for all but LOCK/UNLOCK, check that they are.
+        for var in ERR BACKGROUND; do
+            if [[ ${!var} != false ]] && [[ ${!var} != true ]]; then
+                if [[ ${FUNC} != LOCK ]] && [[ ${FUNC} != UNLOCK ]]; then
+                    log_error "Illegal value ${!var} for ${var} (should be true or false), line for function ${FUNC}"
+                fi
+            fi
+        done
+        case ${FUNC} in
+            NOSTAGE)
+                ${ARGS}
+                ;;
+            RMSTAGE)
+                # Make sure we remove our stage files, so all the
+                # actions will be done again.
+                rm -f ${stagedir}/*
+                ;;
+            LOCK)
+                # We are asked to set a lock, so try to get it.
+                # For this we redefine what the columns mean.
+                # ARGS: Name of the lockfile
+                # TIME: How long to wait for getting the (exclusive) lock
+                # ERR: shared == shared lock, may be hold more than once, exclusive == exclusive, only one.
+
+                lock ${ARGS} ${TIME} ${ERR}
+                ;;
+            UNLOCK)
+                unlock ${ARGS}
+                ;;
+            INCLUDE)
+                includetasks ${ARGS}
+                ;;
+            *)
+                GO=(
+                    FUNC=${FUNC}
+                    TIME=${TIME}
+                    ARGS=${ARGS}
+                    ERR=${ERR}
+                )
+                if [[ ${BACKGROUND} == true ]]; then
+                    stage $GO &
+                else
+                    stage $GO
+                fi
+                ;;
+        esac < /dev/null
+    done < <(grep -v '^#' ${TASKLIST} )
+}
+
+function lock() {
+    local LOCK=${1:-}
+    local TIME=${2:-600}
+    local TYPE=${3:-exclusive}
+
+    if [[ -z ${LOCK} ]]; then
+        log_error "No lockfile name given"
+        exit 21
+    fi
+
+    local LOCKFILE=
+
+    if [[ $LOCK == /* ]]; then
+        LOCKFILE=${LOCK}
+    else
+        # Prepend LOCK_ to lock name to get to variable name,
+        # kind of namespace
+        local lvar="LOCK_${LOCK}"
+        LOCKFILE=${!lvar}
+    fi
+
+    # bash can't open a file read-only, while creating it,
+    # so we need to create it ourselves.
+    if ! [[ -e $LOCKFILE ]]; then
+        install -m 444 /dev/null $LOCKFILE || {
+            log_error "Could not create lock ${LOCKFILE}"
+            laststeps 2
+        }
+    fi
+    #log_error "asdf"
+
+    # Get filehandle
+    local randomstring
+    exec {randomstring}<${LOCKFILE}
+    # Store filehandle for later
+    LOCKFD[${LOCK}]=${randomstring}
+
+    # "Abusing" the err column, expecting the shared/exclusive value there.
+    # Any wrong value means exclusive.
+    case ${ERR} in
+        shared|exclusive)
+            flockparm="--${ERR}"
+            ;;
+        *)
+            flockparm="--exclusive"
+            ;;
+    esac
+
+    # Deal with time being special, usually it means false or true,
+    # but for locks we want a timeout. So if its set to one of the usuals,
+    # assume 300
+    if [[ ${TIME} == none ]]; then
+        TIME=300
+    fi
+    # Now try to get the lock
+    set +e
+    flock ${flockparm} --timeout ${TIME} --conflict-exit-code 3 ${LOCKFD[${LOCK}]}
+    ret=$?
+    set -e
+    case ${ret} in
+        0)
+            return
+            ;;
+        3)
+            log_error "Could not get lock ${LOCKFILE}, timeout"
+            laststeps 2
+            ;;
+        *)
+            log_error "Could not get lock ${LOCKFILE}"
+            laststeps 2
+    esac
+}
+
+function unlock() {
+    local LOCK=${1:-}
+    if [[ -z ${LOCK} ]]; then
+        # Warn, but continue, unlock will happen at script end time
+        log "No lockfile name given"
+    fi
+
+    local randomstring=${LOCKFD[${LOCK}]}
+    exec {randomstring}>&-
+}
+
+function laststeps() {
+    local successval=${1:-0}
+
+    # Redirect output to another file, as we want to compress our logfile
+    # and ensure its no longer used
+    exec > "$logdir/after${PROGRAM}.log" 2>&1
+
+    # Now, at the very (successful) end of this run, make sure we remove
+    # our stage files, so the next script run will do it all again.
+    if [[ ${successval} -eq 0 ]]; then
+        rm -f ${stagedir}/*
+    fi
+    bzip2 -9 ${LOGFILE}
+
+    # Logfile should be gone, remove the symlink
+    [[ -L ${logdir}/${PROGRAM} ]] && [[ ! -f ${logdir}/${PROGRAM} ]] && rm -f ${logdir}/${PROGRAM} || log "Logfile still exists or symlink gone already? Something fishy going on"
+
+    # FIXME: Mail the log when its non-empty
+    [[ -s "${logdir}/after${PROGRAM}.log" ]] || rm "${logdir}/after${PROGRAM}.log"
+}
+
+(
+    # Where we store lockfile filehandles
+    declare -A LOCKFD
+
+    # common functions are "outsourced"
+    . "${configdir}/common"
+
+    # Timestamp when we started
+    NOW=$(date "+%Y.%m.%d-%H:%M:%S")
+
+    # A logfile for every cron script
+    LOGFILE="${logdir}/${PROGRAM}_${NOW}.log"
+
+    # Each "cronscript" may have a variables and a functions file
+    # that we source
+    _preparetasks ${PROGRAM}
+
+    # Get rid of tempfiles at the end
+    trap cleanup EXIT TERM HUP INT QUIT
+
+    # An easy access by name for the current log
+    ln -sf ${LOGFILE} ${logdir}/${PROGRAM}
+
+    # And from here, all output to the log please
+    exec >> "$LOGFILE" 2>&1
+
+    # The stage function uses this directory
+    # This amends the stagedir variable from "vars"
+    stagedir="${stagedir}/${PROGRAM}"
+    # Ensure the dir exists
+    mkdir -p ${stagedir}
+
+    # Run all tasks
+    _runtasks ${PROGRAM}
+
+    # we need to wait for the background processes before the end of the cron script
+    wait
+
+    # Common to all cron scripts
+    log "Cron script successful, all done"
+
+    laststeps 0
+)
+

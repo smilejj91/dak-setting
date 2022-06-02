@@ -1,0 +1,462 @@
+#!/bin/bash
+# No way I try to deal with a crippled sh just for POSIX foo.
+
+# Copyright (C) 2009-2016 Joerg Jaspert <joerg@debian.org>
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License as
+# published by the Free Software Foundation; version 2.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+
+# exit on errors
+set -e
+# A pipeline's return status is the value of the last (rightmost)
+# command to exit with a non-zero status, or zero if all commands exit
+# successfully.
+set -o pipefail
+# make sure to only use defined variables
+set -u
+# ERR traps should be inherited from functions too. (And command
+# substitutions and subshells and whatnot, but for us the functions is
+# the important part here)
+set -E
+
+# If the extglob shell option is enabled using the shopt builtin,
+# several extended pattern matching operators are recognized. We use
+# it for the POSSIBLEARGS and the first case ${ARGS} matching.
+shopt -s extglob
+
+# And use one locale, no matter what the caller has set
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+
+# If run from crontab, CONFIGDIR will point to the correct dir
+# where we find the vars file
+configdir=${configdir:-"/srv/ftp-master.debian.org/dak/config/debian"}
+# import the general variable set. (This will overwrite configdir, but
+# it is expected to have the same value)
+export SCRIPTVARS=${configdir}/vars
+. "${SCRIPTVARS}"
+. "${configdir}/common"
+. "${configdir}/dinstall.functions"
+umask 022
+
+# Get rid of tempfiles at the end
+cleanup() {
+    echo "You have to clean up your mess on your own. Sorry." >&2
+    exit 1
+}
+trap cleanup EXIT TERM HUP INT QUIT
+
+suitename_default=$(psql -qAtc "SELECT codename FROM suite WHERE suite_name='stable'")
+
+function usage() {
+    echo "Fun with a pointrelease"
+    echo "Takes two args, suite and version"
+    echo "Default for suite is ${suitename_default}, version defaults to last plus one"
+}
+
+confirm() {
+    local y=N
+    while [ "${y}" != "y" ]; do
+        read -p "Continue [y/N]?" y
+    done
+}
+
+# Arguments, we like
+while getopts ":hs:v:" OPTION; do
+    case ${OPTION} in
+        s) # suite
+            suitename="${OPTARG}"
+            ;;
+        v) # version
+            newrev="${OPTARG}"
+            ;;
+        h) # help
+            usage
+            exit 0
+            ;;
+        ?)
+            echo "Unknown option ${OPTION} given, try -h"
+            exit 42
+            ;;
+    esac
+done
+
+# Set some variables
+suitename=${suitename:-${suitename_default}}
+suite=$(psql -qAtc "SELECT suite_name FROM suite WHERE codename='${suitename}'")
+oldrev=$(psql -qAtc "SELECT version FROM suite WHERE codename='${suitename}'")
+newrev=${newrev:-${oldrev%.*}.$(( ${oldrev##*.} + 1 ))}
+release_base=https://release.debian.org/proposed-updates/${newrev%%.*}/${newrev}
+PROGRAM="pointrelease_${suitename}"
+
+# Set some variables
+case "${suite}" in
+  stable)    pusuite=proposed-updates ;;
+  oldstable) pusuite=oldstable-proposed-updates ;;
+  *)         pusuite=INVALID ;;
+esac
+
+wget="wget --ca-directory=/etc/ssl/ca-debian"
+
+# set DEBUG if you want to see a little more logs
+DEBUG=${DEBUG:-0}
+
+# common functions are "outsourced"
+. "${configdir}/common"
+
+# Timestamp when we started
+NOW=$(date "+%Y.%m.%d-%H:%M:%S")
+
+log "Point release for ${suite} (${suitename}); old version: ${oldrev}, new: ${newrev}"
+log "Updates come from ${pusuite}"
+
+cd ~
+mkdir -p ${suitename}_${newrev}
+cd ${suitename}_${newrev}
+
+echo "Is there anything to skip in this release? If so, please enter source package names, whitespace separated, if not just hit enter"
+read -e -p "Source packages: " skiplist
+confirm
+
+log "Preparing"
+pg_timestamp pre_${suite}_${newrev}
+
+control-suite-list() {
+    local s="${1:?}"
+    if [[ ! -f ${s}.list ]]; then
+        dak control-suite -l ${s} > ${s}.list &
+    fi
+}
+control-suite-list ${pusuite}
+control-suite-list ${suite}
+control-suite-list ${pusuite}-debug
+control-suite-list ${suite}-debug
+wait
+
+if [[ -n ${skiplist} ]]; then
+  for s in ${pusuite} ${pusuite}-debug; do
+    mv ${s}.list ${s}.list.ori
+    grep -vFf <(dak ls -f heidi -S -s ${s} ${skiplist}) ${s}.list.ori > ${s}.list
+  done
+fi
+
+edit-changelog() {
+    local prompt="${1:?}"
+    shift
+
+    if [ -n "${prompt}" ]; then
+        echo "${prompt}"
+        confirm
+    fi
+
+    $EDITOR "${ftpdir}/dists/${suite}/ChangeLog" "${@}"
+    rm -f -- "${ftpdir}/dists/${suite}/ChangeLog~" "${ftpdir}/dists/${suite}/#ChangeLog#"
+}
+
+log "Creating changelog"
+tmpfile=$(mktemp -p "${TMPDIR}" changelog.XXXXXX)
+dak make-changelog -s ${pusuite} -b ${suite} | cat - ${ftpdir}/dists/${suite}/ChangeLog > ${tmpfile}
+chmod 0644 ${tmpfile}
+mv ${tmpfile} ${ftpdir}/dists/${suite}/ChangeLog
+if [[ -n ${skiplist} ]]; then
+    edit-changelog "Please edit to remove the changelogs for the skipped packages"
+fi
+
+merge-suite() {
+    local source="${1:?}"
+    local target="${2:?}"
+
+    log "Merging ${source} into ${target}"
+    while :; do
+        if dak control-suite --add ${target} < ${source}.list; then
+            log "Done"
+            break
+        else
+            log "Please check problem and hit enter when i can retry"
+            read
+        fi
+    done
+}
+
+merge-suite ${pusuite} ${suite}
+merge-suite ${pusuite}-debug ${suite}-debug
+
+log "Cleaning ${pusuite} and ${pusuite}-debug"
+dak control-suite --remove ${pusuite} < ${pusuite}.list
+dak control-suite --remove ${pusuite}-debug < ${pusuite}-debug.list
+
+log "Cleaning changelogs from proposed-updates"
+pumorguedir="${base}/morgue/queues/$(date +%Y/%m)"
+mkdir -p "${pumorguedir}"
+cd ${ftpdir}/dists/${pusuite}
+mv -t "${pumorguedir}" -n -- *.changes
+if [[ -n ${skiplist} ]]; then
+    for pack in ${skiplist}; do
+        # In corner cases, we may not have the changes file to move back - don't crash
+        if compgen -G ${pumorguedir}/${pack}_*.changes >/dev/null; then
+            mv -t "${ftpdir}/dists/${pusuite}" ${pumorguedir}/${pack}_*.changes
+        else
+            echo 'W: No changes files for ${pumorguedir}/${pack}_*.changes - check this is expected'
+        fi
+    done
+fi
+
+log "Checking for r0 additions and propups"
+cd ~/${suitename}_${newrev}
+
+propups() {
+    local target_suite="${1}"
+    local f="${2:-propups.${target_suite}}"
+    if ${wget} -O "${f}" "${release_base}/${f}"; then
+        echo "Please check ${f} (will open an editor for you)"
+        confirm
+        $EDITOR ${f}
+        dak control-suite --force --add ${target_suite} < ${f}
+    fi
+}
+
+propups ${suitename}-r0 ${suitename}-r0-additions.cs
+propups unstable
+propups unstable-debug
+propups testing
+propups testing-debug
+
+log "RM time"
+hadrms=0
+
+if ${wget} -O "removallist" "${release_base}/removals.${suitename}"; then
+    echo "Please check removallist file, I am going to run it as shell script when you confirm (will open an editor for you)"
+    confirm
+    $EDITOR removallist
+    bash removallist
+    if [ -s removallist ]; then
+        hadrms=1
+    fi
+fi
+
+echo "Any more removals to be done?"
+echo "If nothing - or done, just end with an empty line"
+
+# Blindly ignore errors in dak rm
+set +e
+while :; do
+    read -e -p "RM command: " -i "dak rm -s ${suite} -R -p -d ### -m '###' ###" dakrmcmd
+    if [[ -n ${dakrmcmd} ]]; then
+        eval "${dakrmcmd}"
+        hadrms=1
+        continue
+    else
+        break
+    fi
+done
+set -e
+
+if [[ ${hadrms} -ne 0 ]]; then
+    edit-changelog "You did some removals, please copy their entries into the changelog (will open an editor for you)" ${webdir}/removals.txt
+fi
+
+log "Checking for d-i updates"
+echo "Are there d-i updates? Empty version string, if not."
+echo "Seperate old version to move to morgue by space."
+read -e -p "d-i updates: " diver dioldver
+confirm
+
+if [[ -n ${diver} ]]; then
+    log "Installing new d-i version ${diver}"
+    dak copy-installer -s ${pusuite} -d ${suite} ${diver}
+    # Remove new version from proposed-updates
+    cd $ftpdir/dists/${pusuite}/main
+    for iarch in $(dak admin s-a list-arch ${suite}); do
+        rm -rf -- "installer-${iarch}/${diver}"
+        if [[ -L install-${iarch}/current && "$(readlink install-${iarch}/current)" = "${diver}" ]]; then
+            rm install-${iarch}/current
+        fi
+    done
+
+    if [[ -n ${dioldver} ]]; then
+        log "Moving old d-i version ${dioldver} to morgue"
+        cd $ftpdir/dists/${suite}/main
+        for iarch in $(dak admin s-a list-arch ${suite}); do
+            if [[ -d installer-${iarch}/${dioldver} ]]; then
+                echo "Moving installer-${iarch}/${dioldver} to morgue"
+                mkdir -p "${base}/morgue/d-i/installer-${iarch}/"
+                mv "installer-${iarch}/${dioldver}" "${base}/morgue/d-i/installer-${iarch}/"
+            fi
+        done
+
+        # Remove old version also from proposed-updates
+        cd $ftpdir/dists/${pusuite}/main
+        for iarch in $(dak admin s-a list-arch ${suite}); do
+            rm -rf -- "installer-${iarch}/${dioldver}"
+        done
+    fi
+    cd $ftpdir/dists/${suite}
+fi
+
+log "Checking for win32-loader"
+echo "If anything for win32-loader, enter any string, otherwise empty"
+read -e -p "win32-loader?" win32loader
+if [[ -n ${win32loader} ]]; then
+    cd ${ftpdir}/tools/win32-loader
+    if [ -d ${pusuite} ]; then
+        rm -r ${suite}
+        mv ${pusuite} ${suite}
+    fi
+    cd ${ftpdir}
+fi
+
+log "Updating version numbers in readmes, fixing Changelog"
+cd ${ftpdir}/dists/${suite}
+
+date_long=$(date "+%A, %-dth %B %Y" | sed 's/1th/1st/; s/2th/2nd/; s/3th/3rd/')
+date_iso=$(date "+%Y-%m-%d")
+date_short=$(date "+%a, %d %b %Y")
+sed -e "1i======================================\n${date_short} - Debian ${newrev} released\n======================================" -i ChangeLog
+sed -e "/^${suite}/ s/Debian ${oldrev}/Debian ${newrev}/" -i ../README
+sed -e "s/Debian ${oldrev}/Debian ${newrev}/g; /Debian ${newrev}/ s/released .*\\./released ${date_long}./" -i ../../README
+sed -e "s/Debian ${oldrev}/Debian ${newrev}/g; /Debian ${newrev}/ s/released .*\\./released ${date_long}./; /meta name=\"Modified\"/ s/content=\".*\"/content=\"${date_iso}\"/" -i ../../README.html
+
+echo "Now check if it looks good"
+for f in README README.html dists/README dists/${suite}/ChangeLog; do
+  diff -u ${mirrordir}/ftp-master/${f} ${ftpdir}/${f} || :
+done
+read -e -p "Does the diff look ok? Enter anything if not, empty if yes (if nonempty, I will open an editor for you)" diffcheck
+if [[ -n ${diffcheck} ]]; then
+    cd ${ftpdir}/dists/${suite}
+    edit-changelog "Opening changelog" ../README ../../README ../../README.html
+    rm -f -- ./*~ ../*~ ../../*~ ./"#"*"#" ../"#"*"#" ../../"#"*"#"
+fi
+
+log "Updating the Debianx.y symlink"
+cd $ftpdir/dists/
+rm -f Debian${oldrev}
+ln -s ${suitename} Debian${newrev}
+
+log "Updating suite table in postgres"
+mdate=$(date +"%d %B %Y")
+psql projectb <<EOF
+begin;
+update suite set version = '${newrev}' where suite_name = '${suite}' or suite_name = '${suite}-debug';
+update suite set description = 'Debian ${newrev} Released ${mdate}' where suite_name = '${suite}';
+update suite set description = 'Debian ${newrev} Released ${mdate} - Debug Information' where suite_name = '${suite}-debug';
+commit;
+EOF
+
+log "Preparing for gps, domination/cruft-report time"
+hadremove=0
+while :; do
+    log "dominate"
+    dak dominate --force -s ${suite}
+    log "cruft-report"
+    dak cruft-report -s ${suite}
+    echo "Anything to remove? If so, copy/paste commands into another window, have fun"
+    echo "When done, continue here. Enter anything if you got removals, empty if not (will rerun dominate/cruft-report then)"
+    read -e -p "Anything removed?" -i "yes" removedstuff
+    if [[ -n ${removedstuff} ]]; then
+        hadremove=1
+        continue
+    else
+        break
+    fi
+done
+
+if [[ ${hadremove} -ne 0 ]]; then
+    edit-changelog "You did some removals, please copy their entries into the changelog (will open an editor for you)" ${webdir}/removals.txt
+fi
+
+log "Cleaning up debug suite"
+dak manage-debug-suites ${suite}-debug ${pusuite}-debug
+
+log "Time to run gps/contents, RMs can check if all looks ok"
+gps_suites=${suite},${pusuite},${suite}-debug,${pusuite}-debug
+
+dak generate-packages-sources2 --force -s ${gps_suites}
+${scriptsdir}/sync-release ${suite} &
+log "Contents"
+dak contents generate -f -s ${suite} -a ftp-master
+wait
+${scriptsdir}/sync-release ${suite}
+${scriptsdir}/sync-release ${suite}-debug
+
+echo "Generate release files?"
+confirm
+release_suites="${suite} ${pusuite} ${suite}-debug ${pusuite}-debug"
+dak generate-releases -f -s ${release_suites}
+${scriptsdir}/sync-release ${suite}
+${scriptsdir}/sync-release ${suite}-debug
+
+log "Release file generated, waiting for RMs checking and (hopefully) signing"
+
+# Remove InRelease: Release can be signed by both ftpmaster & stable release keys
+merge-release-signatures() {
+    local archiveroot="${1}"
+    local s="${2}"
+    local oursignature="${3}"
+    local ourmessage="${4}"
+    local releasefile="${5}"
+
+    echo "==== Processing ${s}/${oursignature}..."
+
+    mkdir -p ~/${suitename}_${newrev}/${s}
+
+    # backup ${oursignature} before we modify it...
+    # make a .orig copy which we don't overwrite below
+    cp --no-clobber ${archiveroot}/zzz-dists/${s}/${oursignature} ~/${suitename}_${newrev}/${s}/${oursignature}
+    cp --no-clobber ${archiveroot}/zzz-dists/${s}/${oursignature} ~/${suitename}_${newrev}/${s}/${oursignature}.orig
+
+    cd ~/${suitename}_${newrev}/${s}
+    while ! ${wget} -O "${releasefile}" "${release_base}/${releasefile}"; do
+        sleep 10
+    done
+
+    ${scriptsdir}/gpg-merge-signatures "${oursignature}" "${releasefile}" > ${oursignature}.combined
+    mv ${oursignature}.combined ${oursignature}
+
+    # If detached, copy the text for checking
+    if [ ! -z ${ourmessage} ]; then
+	    cp ${archiveroot}/dists/${s}/${ourmessage} ${ourmessage}
+    fi
+
+    gpg --no-default-keyring --keyring /usr/share/keyrings/debian-archive-keyring.gpg --trust-model=always --verify ${oursignature} ${ourmessage}
+
+    cp ${oursignature} ${archiveroot}/dists/${s}/${oursignature}
+}
+
+merge-release-signatures $(get_archiveroot ftp-master) ${suite} Release.gpg Release Release-${newrev}.gpg
+merge-release-signatures $(get_archiveroot debian-debug) ${suite}-debug Release.gpg Release Release-${newrev}-debug.gpg
+if [ "${suitename}" = stretch ]; then
+    rm -f $(get_archiveroot ftp-master)/dists/${suite}/InRelease $(get_archiveroot ftp-master)/zzz-dists/${suite}/InRelease
+    rm -f $(get_archiveroot debian-debug)/dists/${suite}-debug/InRelease $(get_archiveroot debian-debug)/zzz-dists/${suite}-debug/InRelease
+else
+    merge-release-signatures $(get_archiveroot ftp-master) ${suite} InRelease "" InRelease-${newrev}.gpg
+    merge-release-signatures $(get_archiveroot debian-debug) ${suite}-debug InRelease "" InRelease-${newrev}-debug.gpg
+fi
+
+echo "Done. Is a mirrorpush needed? Or just one to the cd-builder?"
+read -e -p "Mirrorpush? no/cd/yes " -i "cd" mirrorpush
+
+case ${mirrorpush} in
+    no)
+        :
+        ;;
+    yes)
+        $configdir/cronscript mirror
+        ;;
+    cd)
+        mirror
+        mirrorpush-release
+        ;;
+    *)
+        echo "Sod off"
+        ;;
+esac
