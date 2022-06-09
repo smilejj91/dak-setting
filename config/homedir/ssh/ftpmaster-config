@@ -7,7 +7,7 @@ StrictHostKeyChecking yes
 PasswordAuthentication no
 BatchMode yes
 
-Host tmax-uploadqueue
+Host localhost
   User dak
   IdentityFile /srv/dak/scripts/s3kr1t/ssh/sync_new_uploads
   ControlMaster auto

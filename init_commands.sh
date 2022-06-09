@@ -29,10 +29,17 @@ if [ ! -e /srv/dak/bin/dak ]; then
   su - dak -c "mkdir -p /srv/dak/tiffani"
   su - dak -c "mkdir -p /srv/dak/ftp/indices/files/components"
   su - dak -c "mkdir -p /srv/dak/mirror/tos-ftp-master"
+
+  su - dak -c "ssh-keygen -t rsa -q -f '/home/dak/.ssh/id_rsa' -N ''"
+  su - dak -c "cat /home/dak/.ssh/id_rsa.pub > /home/dak/.ssh/authorized_keys"
 fi 
+
+ln -s /srv/dak/mirror/tos-ftp-master /srv/mirror/tmax
 
 /etc/init.d/cron start
 /etc/init.d/exim4 start
+service nginx start
+service ssh start
 
 if [ ! -e /srv/dak/log/current ]; then
   # refer to monthly.functions

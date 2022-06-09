@@ -4,7 +4,7 @@ LOCK                   DAILY                      600                        sha
 LOCK                   UNCHECKED                  600                        exclusive false
 pg_timestamp           preunchecked               none                       true      false
 cleanpolicy            none                       cleanpolicy                false     false
-fetchqueuedpackages    tmax-uploadqueue           fetchqueuedpackages        false     false
+fetchqueuedpackages    localhost                  fetchqueuedpackages        false     false
 LOCK                   BUILDD                     300                        exclusive false
 do_unchecked           none                       unchecked                  false     false
 make_buildd_dir        tos                        none                       false     false
