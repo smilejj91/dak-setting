@@ -11,6 +11,7 @@ fi
 
 sudo -E -u postgres /usr/lib/postgresql/13/bin/pg_ctl -D /var/lib/postgresql/data start "-o -c config_file=/etc/postgresql/13/main/postgresql.conf"
 
+
 if [ ! -e /srv/dak/bin/dak ]; then
   su - 
   ln -s /srv/dak/etc/dak.conf /etc/dak/dak.conf
@@ -29,10 +30,22 @@ if [ ! -e /srv/dak/bin/dak ]; then
   su - dak -c "mkdir -p /srv/dak/tiffani"
   su - dak -c "mkdir -p /srv/dak/ftp/indices/files/components"
   su - dak -c "mkdir -p /srv/dak/mirror/tos-ftp-master"
+  su - dak -c "mkdir -p /srv/dak/backup"
 
   su - dak -c "ssh-keygen -t rsa -q -f '/home/dak/.ssh/id_rsa' -N ''"
   su - dak -c "cat /home/dak/.ssh/id_rsa.pub > /home/dak/.ssh/authorized_keys"
 fi 
+
+if [ ! -e /etc/dak/dak.conf ]; then
+  su - 
+  ln -s /srv/dak/etc/dak.conf /etc/dak/dak.conf
+fi
+
+if [ ! -e /var/spool/cron/crontabs/dak ]; then
+  su -
+  cat /home/dak/dak/config/tos/crontab > /var/spool/cron/crontabs/dak
+  chown dak:crontab /var/spool/cron/crontabs/dak
+fi
 
 ln -s /srv/dak/mirror/tos-ftp-master /srv/mirror/tmax
 

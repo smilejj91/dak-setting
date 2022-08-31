@@ -191,7 +191,7 @@ def main(argv=None):
 
         release = daklib.import_repository.obtain_release(base, suite, keyring)
         target_sources, target_binaries = get_packages_in_suite(target_suite)
-        print(target_binaries['beav'][0].architecture)
+        #print(target_binaries['beav'][0].architecture)
 
         if 'Architectures' in options:
             architectures = options['Architectures'].split(',')

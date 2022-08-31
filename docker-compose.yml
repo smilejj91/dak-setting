@@ -14,6 +14,7 @@ services:
       - /srv/upload.tmaxos.net:/srv/upload.tmaxos.net
     ports:
       - "80:80"
+    shm_size: '1gb'
   tmax-uploadqueue:
     image: harbor.tmaxos.net/infra/tmax-uploadqueue:1.0.1
     network_mode: "host"
